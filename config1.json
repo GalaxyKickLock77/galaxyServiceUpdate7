@@ -1,0 +1,11 @@
+{
+  "RC": "onfoqk2ff1",
+  "startAttackTime": 3955,
+  "stopAttackTime": 3975,
+  "attackIntervalTime": 5,
+  "startDefenceTime": 3955,
+  "stopDefenceTime": 3975,
+  "defenceIntervalTime": 5,
+  "planetName": "",
+  "rival": ["``THALA``"]
+}
