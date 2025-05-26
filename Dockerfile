@@ -57,7 +57,8 @@ RUN npx playwright install
 
 # Install PM2 globally
 RUN npm install -g pm2 && \
-    npm install crypto-js
+    npm install crypto-js \
+    npm install node-fetch
 
 RUN apt-get install jq
 
