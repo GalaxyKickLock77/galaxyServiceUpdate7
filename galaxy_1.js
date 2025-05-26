@@ -2,7 +2,7 @@ const WebSocket = require('ws');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const CryptoJS = require('crypto-js');
-const fetch = require('node-fetch'); // Added for HTTP requests
+//const fetch = require('node-fetch'); // Added for HTTP requests
 const path = require('path');
 const https = require('https');
 const { URL } = require('url');
@@ -305,54 +305,56 @@ function createConnection() {
                 }
                 break;
             case "KICK":
-			console.log(`🔓 KICK command detected: ${message}`);
-			if (parts.length >= commandIndex + 3) {
-				const kickedUserId = parts[commandIndex + 2];
-				
-				// Check if this is a prison release by looking for "released" in the message
-				const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
-				
-				console.log(`Processing KICK for user ID: ${kickedUserId}, bot ID: ${this.botId}, prison state: ${this.prisonState}, is prison release: ${isReleasedFromPrison}`);
-				
-				// Only proceed if this is our bot being kicked AND it's a prison release
-				if (isReleasedFromPrison) {
-					console.log(`🎉 Bot ${this.botId} was released from prison, now joining planet...`);
-					this.send(`JOIN ${config.planetName}`);
-					
-					// Set a very short timeout to send QUIT and trigger fast relogin
-					setTimeout(() => {
-						console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-						this.send("QUIT");
-						this.prisonState = 'IDLE';
-						
-						// Clean up current connection
-						this.cleanup();
-						if (activeConnection === this) {
-							activeConnection = null;
-						}
-						
-						// Immediately trigger fast reconnection
-						console.log("⚡ Starting immediate fast relogin after prison quit");
-						Promise.resolve().then(async () => {
-							try {
-								console.time('prisonRelogin');
-								await getConnection(true); // Use warm connection for fastest reconnect
-								console.timeEnd('prisonRelogin');
-								console.log(`✅ Fast relogin completed after prison release`);
-							} catch (error) {
-								console.error("Failed to fast relogin after prison:", error.message || error);
-								// Fallback to regular reconnection
-								tryReconnectWithBackoff().catch(retryError => {
-									console.error("Prison relogin fallback failed:", retryError.message || retryError);
-								});
-							}
-						});
-					}, 100); // Very short delay - just 100ms to ensure JOIN command is sent first
-				} else {
-					console.log(`KICK command ignored - either not our bot (${kickedUserId} vs ${this.botId}) or not a prison release (contains 'released': ${isReleasedFromPrison})`);
-				}
-			}
-			break;
+                        console.log(`🔓 KICK command detected: ${message}`);
+                        if (parts.length >= commandIndex + 3) {
+                                const kickedUserId = parts[commandIndex + 2];
+
+                                // Check if this is a prison release by looking for "released" in the message
+                                const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
+
+                                console.log(`Processing KICK for user ID: ${kickedUserId}, bot ID: ${this.botId}, prison state: ${this.prisonState}, is prison release: ${isReleasedFromPrison}`);
+
+                                // Only proceed if this is our bot being kicked AND it's a prison release
+                                if (isReleasedFromPrison) {
+                                        console.log(`🎉 Bot ${this.botId} was released from prison, now joining planet...`);
+                                        setTimeout(() => {
+                                        this.send(`JOIN ${config.planetName}`);
+                                        }, 2000);
+
+                                        // Set a very short timeout to send QUIT and trigger fast relogin
+                                        setTimeout(() => {
+                                                console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
+                                                this.send("QUIT");
+                                                this.prisonState = 'IDLE';
+
+                                                // Clean up current connection
+                                                this.cleanup();
+                                                if (activeConnection === this) {
+                                                        activeConnection = null;
+                                                }
+
+                                                // Immediately trigger fast reconnection
+                                                console.log("⚡ Starting immediate fast relogin after prison quit");
+                                                Promise.resolve().then(async () => {
+                                                        try {
+                                                                console.time('prisonRelogin');
+                                                                await getConnection(true); // Use warm connection for fastest reconnect
+                                                                console.timeEnd('prisonRelogin');
+                                                                console.log(`✅ Fast relogin completed after prison release`);
+                                                        } catch (error) {
+                                                                console.error("Failed to fast relogin after prison:", error.message || error);
+                                                                // Fallback to regular reconnection
+                                                                tryReconnectWithBackoff().catch(retryError => {
+                                                                        console.error("Prison relogin fallback failed:", retryError.message || retryError);
+                                                                });
+                                                        }
+                                                });
+                                        }, 3000); // Very short delay - just 100ms to ensure JOIN command is sent first
+                                } else {
+                                        console.log(`KICK command ignored - either not our bot (${kickedUserId} vs ${this.botId}) or not a prison release (contains 'released': ${isReleasedFromPrison})`);
+                                }
+                        }
+                        break;
             case "451":
             case "452":
                 console.log(`Critical error ${command} [${this.botId || 'connecting'}]: ${message}`);
@@ -394,7 +396,7 @@ function createConnection() {
         }
                 
                 // Handle prison automation response
-			if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
+                        if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
             const urlMatch = message.match(/https:\/\/galaxy\.mobstudio\.ru\/services\/\?a=jail_info&usercur=(\d+)&/);
             if (urlMatch && urlMatch[1] === this.botId) {
                 console.log(`Received BROWSER 1 message for jail_info: ${message}`);
@@ -411,16 +413,16 @@ function createConnection() {
                 });
             }
         }
-			} catch (err) {
-				console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
-				if (this.authenticating) {
-					this.authenticating = false;
-					clearTimeout(this.connectionTimeout);
-					reject(err);
-				}
-			}
+                        } catch (err) {
+                                console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
+                                if (this.authenticating) {
+                                        this.authenticating = false;
+                                        clearTimeout(this.connectionTimeout);
+                                        reject(err);
+                                }
+                        }
         },
-			
+
         activateWarmConnection: function() {
             return new Promise((resolve, reject) => {
                 try {
@@ -514,7 +516,7 @@ function createConnection() {
 }
 
 function parse353(message, connection) {
-	if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
+        if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
                     console.log(`🔒 Prison mention detected: "${message}"`);
                     handlePrisonAutomation(connection);
                     return;
@@ -815,7 +817,7 @@ async function handlePrisonAutomation(connection) {
     
     try {
         connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
-        console.log(`🔒 Starting prison automation for connection ${connection.botId}`);
+        console.log(`�� Starting prison automation for connection ${connection.botId}`);
         
         connection.send(`ACTION 29 ${connection.botId}`);
         
