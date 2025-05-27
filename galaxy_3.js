@@ -22,6 +22,10 @@ const connectionPool = [];
 let activeConnection = null;
 let poolWarmupInProgress = false;
 
+const PRISON_POOL_SIZE = 3; // Dedicated prison connections
+const prisonConnectionPool = [];
+let prisonPoolWarmupInProgress = false;
+
 // Connection states
 const CONNECTION_STATES = {
     CLOSED: 'closed',
@@ -82,6 +86,135 @@ function genHash(code) {
     let str = hash.toString(CryptoJS.enc.Hex);
     str = str.split("").reverse().join("0").substr(5, 10);
     return str;
+}
+
+async function warmPrisonConnectionPool() {
+    if (prisonPoolWarmupInProgress) {
+        console.log(`Prison pool warmup skipped: already in progress`);
+        return;
+    }
+    
+    try {
+        prisonPoolWarmupInProgress = true;
+        console.log(`Warming PRISON connection pool (current size: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
+        
+        // Clean up stale connections
+        const now = Date.now();
+        const STALE_THRESHOLD = 3 * 60 * 1000; // 3 minutes for prison connections
+        for (let i = prisonConnectionPool.length - 1; i >= 0; i--) {
+            const conn = prisonConnectionPool[i];
+            if (now - conn.lastUsed > STALE_THRESHOLD || 
+                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY)) {
+                console.log(`Pruning PRISON connection ${conn.botId || 'none'} from pool`);
+                conn.cleanup();
+                prisonConnectionPool.splice(i, 1);
+            }
+        }
+        
+        const connectionsToAdd = Math.max(0, PRISON_POOL_SIZE - prisonConnectionPool.length);
+        if (connectionsToAdd > 0) {
+            console.log(`Adding ${connectionsToAdd} new PRISON warm connection(s)`);
+            
+            const prisonPromises = [];
+            for (let i = 0; i < connectionsToAdd; i++) {
+                const conn = createConnection();
+                conn.isPrisonConnection = true; // Mark as prison connection
+                
+                prisonPromises.push((async () => {
+                    try {
+                        console.log(`Initializing PRISON connection ${i+1}/${connectionsToAdd}`);
+                        await conn.initialize(true);
+                        if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                            prisonConnectionPool.push(conn);
+                            console.log(`Added PRISON connection to pool (total: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
+                            return true;
+                        } else {
+                            conn.cleanup();
+                            return false;
+                        }
+                    } catch (error) {
+                        console.error(`Failed to initialize PRISON connection:`, error.message || error);
+                        conn.cleanup();
+                        return false;
+                    }
+                })());
+            }
+            
+            await Promise.allSettled(prisonPromises);
+        }
+        
+        console.log(`PRISON connection pool warm-up complete. Pool size: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE}`);
+    } catch (err) {
+        console.error("Error in warmPrisonConnectionPool:", err);
+    } finally {
+        prisonPoolWarmupInProgress = false;
+    }
+}
+
+setInterval(() => {
+    if (!prisonPoolWarmupInProgress) {
+        warmPrisonConnectionPool().catch(err => {
+            console.error("Error maintaining prison connection pool:", err);
+        });
+    }
+}, 15000);
+
+setInterval(() => {
+    console.log(`📊 Pool Status - Regular: ${connectionPool.length}/${MAX_POOL_SIZE}, Prison: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE}`);
+}, 60000); // Log every minute
+
+async function getPrisonConnection() {
+    console.log(`Getting PRISON connection from dedicated pool...`);
+    
+    const warmPrisonConnections = prisonConnectionPool.filter(conn => 
+        conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
+    
+    console.log(`PRISON warm connections available: ${warmPrisonConnections.length}/${prisonConnectionPool.length}`);
+    
+    if (warmPrisonConnections.length > 0) {
+        // Get the most recently created prison connection (likely fastest)
+        let newestIdx = -1;
+        let newestTime = 0;
+        for (let i = 0; i < prisonConnectionPool.length; i++) {
+            const conn = prisonConnectionPool[i];
+            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                if (conn.createdAt > newestTime) {
+                    newestTime = conn.createdAt;
+                    newestIdx = i;
+                }
+            }
+        }
+        
+        if (newestIdx !== -1) {
+            const chosenConn = prisonConnectionPool[newestIdx];
+            prisonConnectionPool.splice(newestIdx, 1);
+            console.log(`⚡ Using PRISON connection from dedicated pool (pool size now: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
+            
+            try {
+                console.time('prisonWarmActivation');
+                await chosenConn.activateWarmConnection();
+                console.timeEnd('prisonWarmActivation');
+                activeConnection = chosenConn;
+                
+                // Immediately warm up the prison pool again
+                Promise.resolve().then(() => {
+                    warmPrisonConnectionPool().catch(err => {
+                        console.error("Error re-warming prison pool:", err);
+                    });
+                });
+                
+                return chosenConn;
+            } catch (error) {
+                console.error("Failed to activate PRISON connection:", error.message || error);
+                chosenConn.cleanup();
+                throw error;
+            }
+        }
+    }
+    
+    // Fallback to regular connection if no prison connections available
+    console.log("No PRISON connections available, falling back to regular pool");
+    return getConnection(true);
 }
 
 function createConnection() {
@@ -304,57 +437,131 @@ function createConnection() {
                     remove_user(parts[commandIndex + 1]);
                 }
                 break;
+			// Add this case in the handleMessage switch statement, after case "451":
             case "KICK":
-                        console.log(`🔓 KICK command detected: ${message}`);
-                        if (parts.length >= commandIndex + 3) {
-                                const kickedUserId = parts[commandIndex + 2];
+				console.log(`🔓 KICK command detected: ${message}`);
+				if (parts.length >= commandIndex + 3) {
+					const kickedUserId = parts[commandIndex + 2];
+					const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
 
-                                // Check if this is a prison release by looking for "released" in the message
-                                const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
-
-                                console.log(`Processing KICK for user ID: ${kickedUserId}, bot ID: ${this.botId}, prison state: ${this.prisonState}, is prison release: ${isReleasedFromPrison}`);
-
-                                // Only proceed if this is our bot being kicked AND it's a prison release
-                                if (isReleasedFromPrison) {
-                                        console.log(`🎉 Bot ${this.botId} was released from prison, now joining planet...`);
-                                        setTimeout(() => {
-                                        this.send(`JOIN ${config.planetName}`);
-                                        }, 2000);
-
-                                        // Set a very short timeout to send QUIT and trigger fast relogin
-                                        setTimeout(() => {
-                                                console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-                                                this.send("QUIT");
-                                                this.prisonState = 'IDLE';
-
-                                                // Clean up current connection
-                                                this.cleanup();
-                                                if (activeConnection === this) {
-                                                        activeConnection = null;
-                                                }
-
-                                                // Immediately trigger fast reconnection
-                                                console.log("⚡ Starting immediate fast relogin after prison quit");
-                                                Promise.resolve().then(async () => {
-                                                        try {
-                                                                console.time('prisonRelogin');
-                                                                await getConnection(true); // Use warm connection for fastest reconnect
-                                                                console.timeEnd('prisonRelogin');
-                                                                console.log(`✅ Fast relogin completed after prison release`);
-                                                        } catch (error) {
-                                                                console.error("Failed to fast relogin after prison:", error.message || error);
-                                                                // Fallback to regular reconnection
-                                                                tryReconnectWithBackoff().catch(retryError => {
-                                                                        console.error("Prison relogin fallback failed:", retryError.message || retryError);
-                                                                });
-                                                        }
-                                                });
-                                        }, 3000); // Very short delay - just 100ms to ensure JOIN command is sent first
-                                } else {
-                                        console.log(`KICK command ignored - either not our bot (${kickedUserId} vs ${this.botId}) or not a prison release (contains 'released': ${isReleasedFromPrison})`);
-                                }
-                        }
-                        break;
+					if (isReleasedFromPrison) {
+						console.log(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
+						
+						// PARALLEL EXECUTION - Start both JOIN and HTTP request simultaneously
+						const parallelTasks = [];
+						
+						// Task 1: JOIN command with minimal delay
+						const joinTask = new Promise((resolve, reject) => {
+						let joinAttempts = 0;
+						const maxJoinAttempts = 10;
+						
+						const attemptJoin = () => {
+							joinAttempts++;
+							console.log(`JOIN attempt ${joinAttempts}/${maxJoinAttempts} for ${this.botId}`);
+							
+							// Set up listener for KICK message with 3-second rule
+							const kickListener = (event) => {
+								const message = event.data.toString().trim();
+								console.log(`JOIN attempt ${joinAttempts} received: ${message}`);
+								
+								// Check for the specific 3-second rule KICK message
+								if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+									console.log(`🚫 3-second rule detected on JOIN attempt ${joinAttempts}`);
+									
+									// Remove this specific listener
+									this.socket.removeEventListener('message', kickListener);
+									
+									if (joinAttempts < maxJoinAttempts) {
+										console.log(`⏳ Retrying JOIN in 3.5 seconds... (attempt ${joinAttempts + 1}/${maxJoinAttempts})`);
+										setTimeout(() => {
+											attemptJoin();
+										}, 200); // Wait 3.5 seconds before retry
+									} else {
+										console.log(`❌ Max JOIN attempts (${maxJoinAttempts}) reached for ${this.botId}`);
+										reject(new Error(`JOIN failed after ${maxJoinAttempts} attempts due to 3-second rule`));
+									}
+								} else if (message.includes("JOIN") && !message.includes("KICK")) {
+									// Successful JOIN detected
+									console.log(`✅ JOIN successful for ${this.botId} on attempt ${joinAttempts}`);
+									this.socket.removeEventListener('message', kickListener);
+									resolve('join_complete');
+								}
+							};
+							
+							// Add listener before sending JOIN
+							this.socket.addEventListener('message', kickListener);
+							
+							// Send JOIN command
+							setTimeout(() => {
+								this.send(`JOIN ${config.planetName}`);
+								console.log(`JOIN command sent for ${this.botId} (attempt ${joinAttempts})`);
+								
+								// Set timeout for this attempt (in case no response)
+								setTimeout(() => {
+									if (joinAttempts === maxJoinAttempts) {
+										this.socket.removeEventListener('message', kickListener);
+										resolve('join_timeout'); // Don't fail the entire process
+									}
+								}, 5000); // 5 second timeout per attempt
+							}, joinAttempts === 1 ? 2000 : 100); // First attempt after 2s, subsequent attempts after 100ms
+						};
+						
+						// Start the first attempt
+						attemptJoin();
+					});
+						parallelTasks.push(joinTask);
+						
+						// Task 2: HTTP jail_free request (if we have the data ready)
+						if (this.password) {
+							const httpTask = performJailFreeWithRetry(this, 3, 1000) // 3 retries, 1s between
+								.then(() => {
+									console.log(`HTTP jail_free completed for ${this.botId}`);
+									return 'http_complete';
+								})
+								.catch(error => {
+									console.error(`HTTP jail_free failed for ${this.botId}:`, error.message);
+									return 'http_failed';
+								});
+							parallelTasks.push(httpTask);
+						}
+						
+						// Execute all tasks in parallel and handle completion
+						Promise.allSettled(parallelTasks).then((results) => {
+							console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
+							
+							// Short delay then QUIT for fast relogin
+							setTimeout(() => {
+								console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
+								this.send("QUIT");
+								this.prisonState = 'IDLE';
+								
+								// Clean up and trigger fast reconnection
+								this.cleanup();
+								if (activeConnection === this) {
+									activeConnection = null;
+								}
+								
+								// Use dedicated prison connection pool for fastest reconnect
+								console.log("⚡ Using dedicated prison connection for relogin");
+								Promise.resolve().then(async () => {
+									try {
+										console.time('prisonRelogin');
+										await getPrisonConnection(); // Use dedicated prison pool
+										console.timeEnd('prisonRelogin');
+										console.log(`✅ Fast prison relogin completed`);
+									} catch (error) {
+										console.error("Failed to get prison connection:", error.message || error);
+										// Fallback to regular connection
+										getConnection(true).catch(retryError => {
+											console.error("Prison relogin fallback failed:", retryError.message || retryError);
+										});
+									}
+								});
+							}, 3000); // Reduced QUIT delay
+						});
+					}
+				}
+				break;
             case "451":
             case "452":
                 console.log(`Critical error ${command} [${this.botId || 'connecting'}]: ${message}`);
@@ -395,24 +602,25 @@ function createConnection() {
                 break;
         }
                 
-                // Handle prison automation response
-                        if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
-            const urlMatch = message.match(/https:\/\/galaxy\.mobstudio\.ru\/services\/\?a=jail_info&usercur=(\d+)&/);
-            if (urlMatch && urlMatch[1] === this.botId) {
-                console.log(`Received BROWSER 1 message for jail_info: ${message}`);
-                if (this.prisonTimeout) {
-                    clearTimeout(this.prisonTimeout);
-                    this.prisonTimeout = null;
-                }
-                performJailFree(this).then(() => {
-                    console.log(`Jail free completed for ${this.botId}, waiting for KICK message...`);
-                    this.prisonState = 'WAITING_FOR_KICK';  
-                }).catch(error => {
-                    console.error(`Error in jail_free for ${this.botId}:`, error);
-                    this.prisonState = 'IDLE';
-                });
-            }
-        }
+						// Handle prison automation response
+						if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
+							const urlMatch = message.match(/https:\/\/galaxy\.mobstudio\.ru\/services\/\?a=jail_info&usercur=(\d+)&/);
+							if (urlMatch && urlMatch[1] === this.botId) {
+								console.log(`Received BROWSER 1 message for jail_info: ${message}`);
+								if (this.prisonTimeout) {
+									clearTimeout(this.prisonTimeout);
+									this.prisonTimeout = null;
+								}
+								// FIXED: Use performJailFreeWithRetry instead of performJailFree
+								performJailFreeWithRetry(this, 3, 1000).then(() => {
+									console.log(`Jail free completed for ${this.botId}, waiting for KICK message...`);
+									this.prisonState = 'WAITING_FOR_KICK';  
+								}).catch(error => {
+									console.error(`Error in jail_free for ${this.botId}:`, error);
+									this.prisonState = 'IDLE';
+								});
+							}
+						}
                         } catch (err) {
                                 console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
                                 if (this.authenticating) {
@@ -598,6 +806,135 @@ function remove_user(user) {
     }
 }
 
+async function performJailFreeFast(connection) {
+    const userID = connection.botId;
+    const password = connection.password;
+    const boundary = '----WebKitFormBoundarylRahhWQJyn2QX0gB';
+    
+    const formData = [
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="a"',
+        '',
+        'jail_free',
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="type"',
+        '',
+        'escapeItemDiamond',
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="usercur"',
+        '',
+        userID,
+        `--${boundary}`,
+        'Content-Disposition: form-data; name="ajax"',
+        '',
+        '1',
+        `--${boundary}--`
+    ].join('\r\n');
+    
+    const url = `https://galaxy.mobstudio.ru/services/?&userID=${userID}&password=${password}&query_rand=${Math.random()}`;
+    const parsedUrl = new URL(url);
+    
+    const options = {
+        hostname: parsedUrl.hostname,
+        port: 443,
+        path: parsedUrl.pathname + parsedUrl.search,
+        method: 'POST',
+        headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': Buffer.byteLength(formData),
+            'Accept': '*/*',
+            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
+            'Priority': 'u=1, i',
+            'Sec-CH-UA': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            'Sec-CH-UA-Mobile': '?0',
+            'Sec-CH-UA-Platform': '"Windows"',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin',
+            'X-Galaxy-Client-Ver': '9.5',
+            'X-Galaxy-Kbv': '352',
+            'X-Galaxy-Lng': 'en',
+            'X-Galaxy-Model': 'chrome 137.0.0.0',
+            'X-Galaxy-Orientation': 'portrait',
+            'X-Galaxy-Os-Ver': '1',
+            'X-Galaxy-Platform': 'web',
+            'X-Galaxy-Scr-Dpi': '1',
+            'X-Galaxy-Scr-H': '675',
+            'X-Galaxy-Scr-W': '700',
+            'X-Galaxy-User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
+        }
+    };
+    
+    return new Promise((resolve, reject) => {
+        const req = https.request(options, (res) => {
+            let data = '';
+            
+            res.on('data', (chunk) => {
+                data += chunk;
+            });
+            
+            res.on('end', () => {
+                console.log(`Jail free response for ${userID}:`, data);
+                resolve(data);
+            });
+            
+            res.on('error', (error) => {
+                console.error(`Response error for ${userID}:`, error);
+                reject(error);
+            });
+        });
+        
+        req.on('error', (error) => {
+            console.error(`Request error performing jail_free for ${userID}:`, error.message);
+            reject(error);
+        });
+        
+        req.on('timeout', () => {
+            console.error(`Request timeout for ${userID}`);
+            req.destroy();
+            reject(new Error('Request timeout'));
+        });
+        
+        // Set a timeout for the request
+        req.setTimeout(10000);
+        
+        // Write the form data to the request body
+        req.write(formData);
+        req.end();
+    });
+}
+
+
+
+
+async function performJailFreeWithRetry(connection, maxRetries = 3, retryDelay = 1000) {
+    const userID = connection.botId;
+    const password = connection.password;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            console.log(`Jail free attempt ${attempt}/${maxRetries} for ${userID}`);
+            console.time(`jailFreeAttempt${attempt}`);
+            
+            const result = await performJailFreeFast(connection);
+            console.timeEnd(`jailFreeAttempt${attempt}`);
+            console.log(`✅ Jail free succeeded on attempt ${attempt} for ${userID}`);
+            return result;
+            
+        } catch (error) {
+            console.error(`❌ Jail free attempt ${attempt}/${maxRetries} failed for ${userID}:`, error.message);
+            
+            if (attempt < maxRetries) {
+                const delay = retryDelay * attempt; // Exponential backoff
+                console.log(`⏳ Retrying jail free in ${delay}ms...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+                console.error(`🚫 All jail free attempts failed for ${userID}`);
+                throw new Error(`Jail free failed after ${maxRetries} attempts: ${error.message}`);
+            }
+        }
+    }
+}
 async function warmConnectionPool() {
     if (poolWarmupInProgress) {
         console.log(`Pool warmup skipped: already in progress`);
@@ -660,6 +997,13 @@ async function warmConnectionPool() {
         poolWarmupInProgress = false;
     }
 }
+
+Promise.all([
+    warmConnectionPool().catch(err => console.error("Regular pool init failed:", err)),
+    warmPrisonConnectionPool().catch(err => console.error("Prison pool init failed:", err))
+]).then(() => {
+    console.log("🚀 Both connection pools initialized successfully");
+});
 
 async function getConnection(activateFromPool = true) {
     console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
@@ -816,16 +1160,26 @@ async function handlePrisonAutomation(connection) {
     }
     
     try {
-        connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
-        console.log(`�� Starting prison automation for connection ${connection.botId}`);
+        connection.prisonState = 'JOINING_PRISON_CHANNEL';
+        console.log(`🔒 Starting prison automation for connection ${connection.botId}`);
         
-        connection.send(`ACTION 29 ${connection.botId}`);
+        // First, try to join the prison channel
+        console.log(`🔒 Joining prison channel for ${connection.botId}...`);
+        connection.send(`JOIN`); // Adjust channel name as needed
         
-        connection.prisonTimeout = setTimeout(() => {
-            console.log(`Prison automation timed out for connection ${connection.botId}`);
-            connection.prisonState = 'IDLE';
-            connection.prisonTimeout = null;
-        }, 5000); // Increased timeout to account for waiting for KICK
+        // Wait a moment for the join to complete, then send ACTION 29
+            if (connection.prisonState === 'JOINING_PRISON_CHANNEL') {
+                console.log(`🔒 Sending ACTION 29 for ${connection.botId}...`);
+                connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
+                connection.send(`ACTION 29 ${connection.botId}`);
+                
+                connection.prisonTimeout = setTimeout(() => {
+                    console.log(`Prison automation timed out for connection ${connection.botId}`);
+                    connection.prisonState = 'IDLE';
+                    connection.prisonTimeout = null;
+                }, 3000); // Increased timeout
+            }
+        
     } catch (error) {
         console.error(`Error during prison automation for connection ${connection.botId}:`, error);
         connection.prisonState = 'IDLE';
@@ -836,103 +1190,7 @@ async function handlePrisonAutomation(connection) {
     }
 }
 
-async function performJailFree(connection) {
-    const userID = connection.botId;
-    const password = connection.password;
-    const boundary = '----WebKitFormBoundarylRahhWQJyn2QX0gB';
-    
-    const formData = [
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="a"',
-        '',
-        'jail_free',
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="type"',
-        '',
-        'escapeItemDiamond',
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="usercur"',
-        '',
-        userID,
-        `--${boundary}`,
-        'Content-Disposition: form-data; name="ajax"',
-        '',
-        '1',
-        `--${boundary}--`
-    ].join('\r\n');
-    
-    const url = `https://galaxy.mobstudio.ru/services/?&userID=${userID}&password=${password}&query_rand=${Math.random()}`;
-    const parsedUrl = new URL(url);
-    
-    const options = {
-        hostname: parsedUrl.hostname,
-        port: 443,
-        path: parsedUrl.pathname + parsedUrl.search,
-        method: 'POST',
-        headers: {
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': Buffer.byteLength(formData),
-            'Accept': '*/*',
-            'Accept-Language': 'en-GB,en-US;q=0.9,en;q=0.8',
-            'Priority': 'u=1, i',
-            'Sec-CH-UA': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-            'Sec-CH-UA-Mobile': '?0',
-            'Sec-CH-UA-Platform': '"Windows"',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'X-Galaxy-Client-Ver': '9.5',
-            'X-Galaxy-Kbv': '352',
-            'X-Galaxy-Lng': 'en',
-            'X-Galaxy-Model': 'chrome 137.0.0.0',
-            'X-Galaxy-Orientation': 'portrait',
-            'X-Galaxy-Os-Ver': '1',
-            'X-Galaxy-Platform': 'web',
-            'X-Galaxy-Scr-Dpi': '1',
-            'X-Galaxy-Scr-H': '675',
-            'X-Galaxy-Scr-W': '700',
-            'X-Galaxy-User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
-        }
-    };
-    
-    return new Promise((resolve, reject) => {
-        const req = https.request(options, (res) => {
-            let data = '';
-            
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            
-            res.on('end', () => {
-                console.log(`Jail free response for ${userID}:`, data);
-                resolve(data);
-            });
-            
-            res.on('error', (error) => {
-                console.error(`Response error for ${userID}:`, error);
-                reject(error);
-            });
-        });
-        
-        req.on('error', (error) => {
-            console.error(`Request error performing jail_free for ${userID}:`, error.message);
-            reject(error);
-        });
-        
-        req.on('timeout', () => {
-            console.error(`Request timeout for ${userID}`);
-            req.destroy();
-            reject(new Error('Request timeout'));
-        });
-        
-        // Set a timeout for the request
-        req.setTimeout(10000);
-        
-        // Write the form data to the request body
-        req.write(formData);
-        req.end();
-    });
-}
+
 
 warmConnectionPool().catch(err => {
     console.error("Error during initial connection pool warm-up:", err);
