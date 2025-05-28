@@ -1,11 +1,11 @@
 {
-  "RC": "l77mufpsgy",
-  "startAttackTime": 1900,
-  "stopAttackTime": 1950,
+  "RC": "",
+  "startAttackTime": 1875,
+  "stopAttackTime": 1925,
   "attackIntervalTime": 5,
-  "startDefenceTime": 1900,
-  "stopDefenceTime": 1950,
+  "startDefenceTime": 1775,
+  "stopDefenceTime": 1850,
   "defenceIntervalTime": 5,
   "planetName": "THE_BOT",
-  "rival": ["``THALA``"]
+  "rival": [""]
 }
