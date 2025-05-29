@@ -102,11 +102,14 @@ function updateConfigValues() {
                 current: defenseTimingState.currentTime 
             }
         });
+        
+        // Debug the timing states after config update
+        debugTimingStates();
+        
     } catch (error) {
         console.error("Error updating config:", error);
     }
 }
-
 updateConfigValues();
 
 fsSync.watch('config1.json', (eventType) => {
@@ -123,15 +126,20 @@ function genHash(code) {
     return str;
 }
 
-function incrementTiming(mode, errorType = '3second') {
+function incrementTiming(mode, errorType = 'success') {
     const isAttack = mode === 'attack';
     const timingState = isAttack ? attackTimingState : defenseTimingState;
     const configStart = isAttack ? config.startAttackTime : config.startDefenceTime;
     const configStop = isAttack ? config.stopAttackTime : config.stopDefenceTime;
     const configInterval = isAttack ? config.attackIntervalTime : config.defenceIntervalTime;
     
-    // Increment consecutive errors
-    timingState.consecutiveErrors++;
+    // Only increment consecutive errors for actual errors
+    if (errorType !== 'success') {
+        timingState.consecutiveErrors++;
+    } else {
+        // Reset error count on successful action
+        timingState.consecutiveErrors = 0;
+    }
     
     // Calculate new timing
     const oldTime = timingState.currentTime;
@@ -143,13 +151,12 @@ function incrementTiming(mode, errorType = '3second') {
         timingState.consecutiveErrors = 0; // Reset error count on cycle
         console.log(`${mode} timing cycled back to start: ${timingState.currentTime}ms`);
     } else {
-        console.log(`${mode} timing incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors})`);
+        console.log(`${mode} timing incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
     }
     
     timingState.lastMode = mode;
     return timingState.currentTime;
 }
-
 function getCurrentTiming(mode) {
     const isAttack = mode === 'attack';
     const timingState = isAttack ? attackTimingState : defenseTimingState;
@@ -632,6 +639,15 @@ function createConnection() {
                         if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
                         break;
                     case "KICK":
+                        if (payload && (payload.includes("fast") || payload.includes("быстр") || 
+                                    payload.includes("секунд") || payload.includes("second"))) {
+                            console.log(`Timing-related error detected: ${message}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, 'timing_error');
+                                console.log(`Adjusted ${currentMode} timing due to timing error: ${newTiming}ms`);
+                            }
+                        }
+                        break;
                         console.log(`🔓 KICK command detected: ${message}`);
                         if (parts.length >= commandIndex + 3) {
                             const kickedUserId = parts[commandIndex + 2];
@@ -796,17 +812,23 @@ function createConnection() {
                         }
                         break;
                     case "850":
-                    if (payload.includes("3 секунд(ы)")) {
-                        console.log(`850 error detected in mode: ${currentMode}`);
-                        if (currentMode === 'attack' || currentMode === 'defence') {
-                            const newTiming = incrementTiming(currentMode, '3second');
-                            console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
-                        } else {
-                            console.log(`850 error but no active mode, current mode: ${currentMode}`);
-                        }
+                if (payload.includes("3 секунд(ы)")) {
+                    console.log(`850 error detected in mode: ${currentMode}`);
+                    if (currentMode === 'attack' || currentMode === 'defence') {
+                        const newTiming = incrementTiming(currentMode, '3second');
+                        console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+                    } else {
+                        console.log(`850 error but no active mode, current mode: ${currentMode}`);
                     }
-                    break;
-
+                } else {
+                    // Handle other 850 errors that might affect timing
+                    console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
+                    if (currentMode === 'attack' || currentMode === 'defence') {
+                        const newTiming = incrementTiming(currentMode, 'general_error');
+                        console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
+                    }
+                }
+                break;
                 }
                 
                 if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
@@ -1138,6 +1160,10 @@ async function handleRivals(rivals, mode, connection) {
             console.log(`Actions sent to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
         }
     }
+    
+    // FIX: Increment timing after sending actions (assuming success)
+    const newTiming = incrementTiming(mode, 'success');
+    console.log(`✅ ${mode} timing incremented after actions: ${newTiming}ms`);
     
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
     connection.cleanup(true);
