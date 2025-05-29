@@ -33,7 +33,7 @@ let currentMode = null;
 
 // Connection pool settings
 const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
+const RECONNECT_BACKOFF_BASE = 5000; // Ultra-fast backoff base
 const connectionPool = [];
 let activeConnection = null;
 
@@ -519,26 +519,34 @@ function createConnection() {
                         }
                         break;
                     case "REGISTER":
-                        if (parts.length >= commandIndex + 4) {
-                            this.botId = parts[commandIndex + 1];
-                            this.password = parts[commandIndex + 2];
-                            this.nick = parts[commandIndex + 3];
-                            if (stopAtHash) {
-                                this.registrationData = message;
-                                console.log(`Stored registration data for warm pool connection [${this.botId}]`);
-                                clearTimeout(this.connectionTimeout);
-                                this.authenticating = false;
-                                resolve(this);
-                                return;
-                            }
-                            if (this.hash) {
-                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                                this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
-                                this.send(`RECOVER ${recoveryCode}`);
-                                console.log(`Authenticated with USER command [${this.botId}]`);
-                            }
+                    if (parts.length >= commandIndex + 4) {
+                        this.botId = parts[commandIndex + 1];
+                        this.password = parts[commandIndex + 2];
+                        this.nick = parts[commandIndex + 3];
+                        if (stopAtHash) {
+                            this.registrationData = message;
+                            console.log(`Stored registration data for warm pool connection [${this.botId}]`);
+                            clearTimeout(this.connectionTimeout);
+                            this.authenticating = false;
+                            resolve(this);
+                            return;
                         }
-                        break;
+                        if (this.hash) {
+                            // Add 800ms delay before sending USER command to avoid 452 error
+                            console.log(`Delaying USER command by 800ms to avoid 452 error [${this.botId}]`);
+                            setTimeout(() => {
+                                if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                                    this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                                    this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                                    this.send(`RECOVER ${recoveryCode}`);
+                                    console.log(`Authenticated with USER command after delay [${this.botId}]`);
+                                } else {
+                                    console.error(`Socket closed before USER command could be sent [${this.botId}]`);
+                                }
+                            }, 200); // 800ms delay to avoid 452 error
+                        }
+                    }
+                    break;
                     case "999":
                         this.state = CONNECTION_STATES.AUTHENTICATED;
                         console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
@@ -700,11 +708,15 @@ function createConnection() {
                         this.cleanup();
                         break;
                     case "452":
-                        console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
-                        if (this.authenticating && this.userCommandRetryCount < 10) {
-                            this.userCommandRetryCount++;
-                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
+                    console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
+                    if (this.authenticating && this.userCommandRetryCount < 10) {
+                        this.userCommandRetryCount++;
+                        console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}] - waiting 500ms...`);
+                        
+                        // Add 500ms delay before retry to avoid rapid 452 errors
+                        setTimeout(() => {
                             if (this.botId && this.password && this.nick && this.hash) {
+                                console.log(`Sending USER command retry ${this.userCommandRetryCount}/10 [${this.botId}]`);
                                 this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
                             } else {
                                 console.error(`Cannot retry USER command: missing required data [${this.botId}]`);
@@ -713,23 +725,25 @@ function createConnection() {
                                 this.cleanup();
                                 reject(new Error(`Critical error 452 and missing data for retry`));
                             }
-                        } else if (this.authenticating) {
-                            this.authenticating = false;
-                            clearTimeout(this.connectionTimeout);
-                            this.cleanup();
-                            const index = connectionPool.indexOf(this);
-                            if (index !== -1) connectionPool.splice(index, 1);
-                            if (this === activeConnection) {
-                                activeConnection = null;
-                            }
-                            console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying immediate recovery...`);
-                            reject(new Error(`Critical error 452 after retries`));
-                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
-                            return;
-                        } else {
-                            this.cleanup();
+                        }, 1000); // 500ms delay before retry
+                        
+                    } else if (this.authenticating) {
+                        this.authenticating = false;
+                        clearTimeout(this.connectionTimeout);
+                        this.cleanup();
+                        const index = connectionPool.indexOf(this);
+                        if (index !== -1) connectionPool.splice(index, 1);
+                        if (this === activeConnection) {
+                            activeConnection = null;
                         }
-                        break;
+                        console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying immediate recovery...`);
+                        reject(new Error(`Critical error 452 after retries`));
+                        Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
+                        return;
+                    } else {
+                        this.cleanup();
+                    }
+                    break;
                     case "850":
                         if (payload.includes("3 секунд(ы)")) {
                             if (currentMode === 'attack') {

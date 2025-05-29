@@ -1,11 +1,11 @@
 {
   "RC": "onfoqk2ff1",
-  "startAttackTime": 1875,
-  "stopAttackTime": 1925,
+  "startAttackTime": 1700,
+  "stopAttackTime": 1800,
   "attackIntervalTime": 5,
   "startDefenceTime": 1915,
   "stopDefenceTime": 1945,
   "defenceIntervalTime": 5,
   "planetName": "THE_BOT",
-  "rival": [""]
+  "rival": ["WTH"]
 }
