@@ -40,6 +40,18 @@ let activeConnection = null;
 // Prison pool settings
 const prisonConnectionPool = [];
 
+let attackTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
+
+let defenseTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
+
 // Connection states
 const CONNECTION_STATES = {
     CLOSED: 'closed',
@@ -55,6 +67,15 @@ let currentAttackTime;
 let currentDefenceTime;
 let monitoringMode = true;
 
+function initializeTimingStates() {
+    attackTimingState.currentTime = config.startAttackTime;
+    defenseTimingState.currentTime = config.startDefenceTime;
+    console.log("Timing states initialized:", {
+        attack: attackTimingState.currentTime,
+        defense: defenseTimingState.currentTime
+    });
+}
+
 function updateConfigValues() {
     try {
         delete require.cache[require.resolve('./config1.json')];
@@ -62,14 +83,24 @@ function updateConfigValues() {
         rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
         recoveryCode = config.RC;
         
-        currentAttackTime = config.startAttackTime;
-        currentDefenceTime = config.startDefenceTime;
+        // Initialize timing states instead of individual variables
+        initializeTimingStates();
         
         console.log("Configuration updated:", { 
             rivalNames, 
             recoveryCode,
-            attackSettings: { start: config.startAttackTime, stop: config.stopAttackTime, interval: config.attackIntervalTime, current: currentAttackTime },
-            defenceSettings: { start: config.startDefenceTime, stop: config.stopDefenceTime, interval: config.defenceIntervalTime, current: currentDefenceTime }
+            attackSettings: { 
+                start: config.startAttackTime, 
+                stop: config.stopAttackTime, 
+                interval: config.attackIntervalTime, 
+                current: attackTimingState.currentTime 
+            },
+            defenseSettings: { 
+                start: config.startDefenceTime, 
+                stop: config.stopDefenceTime, 
+                interval: config.defenceIntervalTime, 
+                current: defenseTimingState.currentTime 
+            }
         });
     } catch (error) {
         console.error("Error updating config:", error);
@@ -91,6 +122,42 @@ function genHash(code) {
     str = str.split("").reverse().join("0").substr(5, 10);
     return str;
 }
+
+function incrementTiming(mode, errorType = '3second') {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? attackTimingState : defenseTimingState;
+    const configStart = isAttack ? config.startAttackTime : config.startDefenceTime;
+    const configStop = isAttack ? config.stopAttackTime : config.stopDefenceTime;
+    const configInterval = isAttack ? config.attackIntervalTime : config.defenceIntervalTime;
+    
+    // Increment consecutive errors
+    timingState.consecutiveErrors++;
+    
+    // Calculate new timing
+    const oldTime = timingState.currentTime;
+    timingState.currentTime += configInterval;
+    
+    // Reset if exceeding maximum
+    if (timingState.currentTime > configStop) {
+        timingState.currentTime = configStart;
+        timingState.consecutiveErrors = 0; // Reset error count on cycle
+        console.log(`${mode} timing cycled back to start: ${timingState.currentTime}ms`);
+    } else {
+        console.log(`${mode} timing incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors})`);
+    }
+    
+    timingState.lastMode = mode;
+    return timingState.currentTime;
+}
+
+function getCurrentTiming(mode) {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? attackTimingState : defenseTimingState;
+    
+    // Return current timing or default if not set
+    return timingState.currentTime || (isAttack ? config.startAttackTime : config.startDefenceTime);
+}
+
 
 async function optimizedConnectionPoolMaintenance() {
     if (poolMaintenanceInProgress) {
@@ -547,8 +614,6 @@ function createConnection() {
                         this.send("MYADDONS 0 0");
                         this.send("PHONE 0 0 0 2 :Node.js");
                         this.send("JOIN");
-                        currentAttackTime = config.startAttackTime;
-                        currentDefenceTime = config.startDefenceTime;
                         this.state = CONNECTION_STATES.READY;
                         this.authenticating = false;
                         this.userCommandRetryCount = 0;
@@ -731,18 +796,17 @@ function createConnection() {
                         }
                         break;
                     case "850":
-                        if (payload.includes("3 секунд(ы)")) {
-                            if (currentMode === 'attack') {
-                                currentAttackTime += config.attackIntervalTime;
-                                if (currentAttackTime > config.stopAttackTime) currentAttackTime = config.startAttackTime;
-                                console.log(`Hit 3-second rule in attack mode, increased attack time to: ${currentAttackTime}ms`);
-                            } else if (currentMode === 'defence') {
-                                currentDefenceTime += config.defenceIntervalTime;
-                                if (currentDefenceTime > config.stopDefenceTime) currentDefenceTime = config.startDefenceTime;
-                                console.log(`Hit 3-second rule in defence mode, increased defence time to: ${currentDefenceTime}ms`);
-                            }
+                    if (payload.includes("3 секунд(ы)")) {
+                        console.log(`850 error detected in mode: ${currentMode}`);
+                        if (currentMode === 'attack' || currentMode === 'defence') {
+                            const newTiming = incrementTiming(currentMode, '3second');
+                            console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+                        } else {
+                            console.log(`850 error but no active mode, current mode: ${currentMode}`);
                         }
-                        break;
+                    }
+                    break;
+
                 }
                 
                 if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
@@ -1055,8 +1119,10 @@ async function handleRivals(rivals, mode, connection) {
     }
     
     currentMode = mode;
-    const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
+    const waitTime = getCurrentTiming(mode);
     console.log(`Handling rivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
+    console.log(`Timing state - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
+    
     monitoringMode = false;
     
     for (const rival of rivals) {
@@ -1064,7 +1130,7 @@ async function handleRivals(rivals, mode, connection) {
         if (id) {
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) [${connection.botId}]`);
+                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
@@ -1074,11 +1140,11 @@ async function handleRivals(rivals, mode, connection) {
     }
     
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
-    connection.cleanup(true); // Send QUIT before closing
+    connection.cleanup(true);
     if (activeConnection === connection) activeConnection = null;
     monitoringMode = true;
     
-    console.log("⚡ Actions completed, waiting 500ms before activating new connection");
+    console.log("⚡ Actions completed, waiting 1500ms before activating new connection");
     setTimeout(() => {
         Promise.resolve().then(async () => {
             try {
@@ -1092,6 +1158,7 @@ async function handleRivals(rivals, mode, connection) {
         });
     }, 1500);
 }
+
 
 async function handlePrisonAutomation(connection) {
     if (connection.prisonState !== 'IDLE') {
@@ -1144,6 +1211,10 @@ setInterval(() => {
     const healthyPrison = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
     console.log(`📊 Optimized Pool Status - Regular: ${healthyRegular}/${connectionPool.length} (target: ${POOL_TARGET_SIZE}), Prison: ${healthyPrison}/${prisonConnectionPool.length} (target: ${PRISON_POOL_TARGET_SIZE})`);
 }, 30000);
+
+setInterval(() => {
+    console.log(`📊 Timing States - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
+}, 60000);
 
 async function recoverUser(password) {
     console.log("Starting recovery with code:", password);
