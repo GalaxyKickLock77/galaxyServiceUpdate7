@@ -7,9 +7,9 @@ const https = require('https');
 const { URL } = require('url');
 
 // Optimized Connection Pool Settings
-const POOL_MIN_SIZE = 2;
-const POOL_MAX_SIZE = 2;
-const POOL_TARGET_SIZE = 2;
+const POOL_MIN_SIZE = 1;
+const POOL_MAX_SIZE = 1;
+const POOL_TARGET_SIZE = 1;
 const POOL_HEALTH_CHECK_INTERVAL = 10000; // 10 seconds for frequent checks
 const CONNECTION_MAX_AGE = 2 * 60 * 1000; // 2 minutes
 const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
