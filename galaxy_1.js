@@ -15,9 +15,9 @@ const CONNECTION_MAX_AGE = 2 * 60 * 1000; // 2 minutes
 const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
 
 // Prison Pool Settings
-const PRISON_POOL_MIN_SIZE = 1;
-const PRISON_POOL_MAX_SIZE = 10;
-const PRISON_POOL_TARGET_SIZE = 2;
+const PRISON_POOL_MIN_SIZE = 3;
+const PRISON_POOL_MAX_SIZE = 5;
+const PRISON_POOL_TARGET_SIZE = 3;
 const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000; // 1 minute for rapid turnover
 
 let poolMaintenanceInProgress = false;
@@ -146,7 +146,7 @@ async function createPoolConnections(count) {
         const conn = createConnection();
         creationPromises.push((async () => {
             try {
-                console.log(`Initializing pool connection ${i+1}/${count}`);
+                console.log(`Initializing pool connection ${(i+1)}/${count}`);
                 await conn.initialize(true);
                 if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
                     connectionPool.push(conn);
@@ -186,7 +186,7 @@ async function optimizedPrisonPoolMaintenance() {
             const age = now - conn.createdAt;
             const idleTime = now - conn.lastUsed;
             
-            if (age > PRISON_CONNECTION_MAX_AGE || idleTime > CONNECTION_IDLE_TIMEOUT || 
+            if (age > PRISON_CONNECTION_MAX_AGE  || idleTime > CONNECTION_IDLE_TIMEOUT || 
                 (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY) || !conn.registrationData) {
                 console.log(`Pruning PRISON connection ${conn.botId || 'none'} (Age: ${Math.round(age/1000)}s)`);
                 conn.cleanup();
@@ -573,75 +573,115 @@ function createConnection() {
                             const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
                             if (isReleasedFromPrison) {
                                 console.log(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
+                                
+                                // PARALLEL EXECUTION - Start both JOIN and HTTP request simultaneously
                                 const parallelTasks = [];
+                                
+                                // Task 1: JOIN command with minimal delay
                                 const joinTask = new Promise((resolve, reject) => {
                                     let joinAttempts = 0;
                                     const maxJoinAttempts = 10;
+                                    
                                     const attemptJoin = () => {
                                         joinAttempts++;
                                         console.log(`JOIN attempt ${joinAttempts}/${maxJoinAttempts} for ${this.botId}`);
+                                        
+                                        // Set up listener for KICK message with 3-second rule
                                         const kickListener = (event) => {
-                                            const msg = event.data.toString().trim();
-                                            console.log(`JOIN attempt ${joinAttempts} received: ${msg}`);
-                                            if (msg.includes("KICK") && msg.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+                                            const message = event.data.toString().trim();
+                                            console.log(`JOIN attempt ${joinAttempts} received: ${message}`);
+                                            
+                                            // Check for the specific 3-second rule KICK message
+                                            if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+                                                console.log(`🚫 3-second rule detected on JOIN attempt ${joinAttempts}`);
                                                 this.socket.removeEventListener('message', kickListener);
                                                 if (joinAttempts < maxJoinAttempts) {
                                                     console.log(`⏳ Retrying JOIN in 200ms... (attempt ${joinAttempts + 1}/${maxJoinAttempts})`);
-                                                    setTimeout(attemptJoin, 200);
+                                                    setTimeout(() => {
+                                                        attemptJoin();
+                                                    }, 200); // Wait 200ms before retry
                                                 } else {
+                                                    console.log(`❌ Max JOIN attempts (${maxJoinAttempts}) reached for ${this.botId}`);
                                                     reject(new Error(`JOIN failed after ${maxJoinAttempts} attempts due to 3-second rule`));
                                                 }
-                                            } else if (msg.includes("JOIN") && !msg.includes("KICK")) {
+                                            } else if (message.includes("JOIN") && !message.includes("KICK")) {
+                                                // Successful JOIN detected
                                                 console.log(`✅ JOIN successful for ${this.botId} on attempt ${joinAttempts}`);
                                                 this.socket.removeEventListener('message', kickListener);
                                                 resolve('join_complete');
                                             }
                                         };
+                                        
+                                        // Add listener before sending JOIN
                                         this.socket.addEventListener('message', kickListener);
+                                        
+                                        // Send JOIN command
                                         setTimeout(() => {
                                             this.send(`JOIN ${config.planetName}`);
                                             console.log(`JOIN command sent for ${this.botId} (attempt ${joinAttempts})`);
+                                            
+                                            // Set timeout for this attempt (in case no response)
                                             setTimeout(() => {
                                                 if (joinAttempts === maxJoinAttempts) {
                                                     this.socket.removeEventListener('message', kickListener);
-                                                    resolve('join_timeout');
+                                                    resolve('join_timeout'); // Don't fail the entire process
                                                 }
-                                            }, 3000);
-                                        }, joinAttempts === 1 ? 0 : 100);
+                                            }, 5000); // 5 second timeout per attempt
+                                        }, joinAttempts === 1 ? 2000 : 100); // First attempt after 2s, subsequent attempts after 100ms
                                     };
+                                    
+                                    // Start the first attempt
                                     attemptJoin();
                                 });
                                 parallelTasks.push(joinTask);
+                                
+                                // Task 2: HTTP jail_free request (if we have the data ready)
                                 if (this.password) {
-                                    const httpTask = performJailFreeWithRetry(this, 3, 500)
-                                        .then(() => 'http_complete')
+                                    const httpTask = performJailFreeWithRetry(this, 3, 1000)
+                                        .then(() => {
+                                            console.log(`HTTP jail_free completed for ${this.botId}`);
+                                            return 'http_complete';
+                                        })
                                         .catch(error => {
                                             console.error(`HTTP jail_free failed for ${this.botId}:`, error.message);
                                             return 'http_failed';
                                         });
                                     parallelTasks.push(httpTask);
                                 }
+                                
+                                // Execute all tasks in parallel and handle completion
                                 Promise.allSettled(parallelTasks).then((results) => {
                                     console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
+                                    
+                                    // Short delay then QUIT for fast relogin
                                     setTimeout(() => {
                                         console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
                                         this.send("QUIT");
                                         this.prisonState = 'IDLE';
+                                        
+                                        // Clean up and trigger fast reconnection
                                         this.cleanup();
-                                        if (activeConnection === this) activeConnection = null;
+                                        if (activeConnection === this) {
+                                            activeConnection = null;
+                                        }
+                                        
+                                        // Use dedicated prison connection pool for fastest reconnect
                                         console.log("⚡ Using dedicated prison connection for relogin");
                                         Promise.resolve().then(async () => {
                                             try {
                                                 console.time('prisonRelogin');
-                                                await getPrisonConnection();
+                                                await getPrisonConnection(); // Use dedicated prison pool
                                                 console.timeEnd('prisonRelogin');
                                                 console.log(`✅ Fast prison relogin completed`);
                                             } catch (error) {
                                                 console.error("Failed to get prison connection:", error.message || error);
-                                                getConnection(true).catch(retryError => console.error("Prison relogin fallback failed:", retryError.message || retryError));
+                                                // Fallback to regular connection
+                                                getConnection(true).catch(retryError => {
+                                                    console.error("Prison relogin fallback failed:", retryError.message || retryError);
+                                                });
                                             }
                                         });
-                                    }, 1000);
+                                    }, 3000); // Reduced QUIT delay
                                 });
                             }
                         }
@@ -984,7 +1024,7 @@ async function performJailFreeFast(connection) {
     });
 }
 
-async function performJailFreeWithRetry(connection, maxRetries = 3, retryDelay = 500) {
+async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay = 500) {
     const userID = connection.botId;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -1078,7 +1118,7 @@ async function handlePrisonAutomation(connection) {
     } catch (error) {
         console.error(`Error during prison automation for connection ${connection.botId}:`, error);
         connection.prisonState = 'IDLE';
-        if (connection.prisonTimeout) clearTimeout(connection.prisonTimeout);
+        if (connection.prisonTimeout) clearTimeout(this.prisonTimeout);
     }
 }
 
