@@ -647,7 +647,6 @@ function createConnection() {
                                 console.log(`Adjusted ${currentMode} timing due to timing error: ${newTiming}ms`);
                             }
                         }
-                        break;
                         console.log(`🔓 KICK command detected: ${message}`);
                         if (parts.length >= commandIndex + 3) {
                             const kickedUserId = parts[commandIndex + 2];
