@@ -855,64 +855,74 @@ function createConnection() {
         },
         
         activateWarmConnection: function() {
-            return new Promise((resolve, reject) => {
-                try {
-                    if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
-                        reject(new Error("Cannot activate connection that isn't properly warmed up"));
-                        return;
-                    }
-                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
-                    this.authenticating = true;
-                    this.connectionTimeout = setTimeout(() => {
-                        console.log("Connection activation timeout");
-                        this.authenticating = false;
-                        reject(new Error("Connection activation timeout"));
-                    }, 1000);
-                    const parts = this.registrationData.split(/\s+/);
-                    if (parts.length >= 4) {
-                        this.botId = parts[1];
-                        this.password = parts[2];
-                        this.nick = parts[3];
-                        if (this.hash) {
-                            this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                            console.log(`Activated warm connection with USER command [${this.botId}]`);
-                            const originalOnMessage = this.socket.onmessage;
-                            this.socket.onmessage = (event) => {
-                                const message = event.data.toString().trim();
-                                console.log(`Activation received: ${message}`);
-                                if (message.startsWith("999")) {
-                                    this.state = CONNECTION_STATES.AUTHENTICATED;
-                                    console.log(`Warm connection [${this.botId}] authenticated, sending setup commands...`);
-                                    this.send("FWLISTVER 0");
-                                    this.send("ADDONS 0 0");
-                                    this.send("MYADDONS 0 0");
-                                    this.send("PHONE 0 0 0 2 :Node.js");
-                                    this.send("JOIN");
-                                    this.state = CONNECTION_STATES.READY;
-                                    this.authenticating = false;
-                                    this.userCommandRetryCount = 0;
-                                    reconnectAttempt = 0;
-                                    if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
-                                    console.log(`⚡ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
-                                    this.socket.onmessage = originalOnMessage;
-                                    resolve(this);
-                                    return;
-                                }
-                                if (originalOnMessage) originalOnMessage(event);
-                            };
-                        } else {
-                            reject(new Error("No hash available for activation"));
-                        }
-                    } else {
-                        reject(new Error("Invalid registration data for activation"));
-                    }
-                } catch (err) {
-                    console.error("Error during warm connection activation:", err);
-                    this.authenticating = false;
-                    clearTimeout(this.connectionTimeout);
-                    reject(err);
+        return new Promise((resolve, reject) => {
+            try {
+                if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
+                    reject(new Error("Cannot activate connection that isn't properly warmed up"));
+                    return;
                 }
-            });
+                console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
+                this.authenticating = true;
+                this.connectionTimeout = setTimeout(() => {
+                    console.log("Connection activation timeout");
+                    this.authenticating = false;
+                    reject(new Error("Connection activation timeout"));
+                }, 1000);
+
+                const parts = this.registrationData.split(/\s+/);
+                if (parts.length >= 4) {
+                    this.botId = parts[1];
+                    this.password = parts[2];
+                    this.nick = parts[3];
+                    if (this.hash) {
+                        let authenticationComplete = false;
+
+                        // Set up one-time authentication handler
+                        let authHandler = (event) => {
+                            const message = event.data.toString().trim();
+                            if (message.startsWith("999") && !authenticationComplete) {
+                                authenticationComplete = true;
+                                // Remove this temporary handler
+                                this.socket.removeEventListener('message', authHandler);
+                                
+                                this.state = CONNECTION_STATES.AUTHENTICATED;
+                                console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                this.send("FWLISTVER 0");
+                                this.send("ADDONS 0 0");
+                                this.send("MYADDONS 0 0");
+                                this.send("PHONE 0 0 0 2 :Node.js");
+                                this.send("JOIN");
+                                this.state = CONNECTION_STATES.READY;
+                                this.authenticating = false;
+                                this.userCommandRetryCount = 0;
+                                reconnectAttempt = 0;
+                                
+                                if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+                                console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                
+                                resolve(this);
+                            }
+                        };
+
+                        // Add the temporary auth handler
+                        this.socket.addEventListener('message', authHandler);
+                        
+                        // Send USER command
+                        this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                        console.log(`Activated warm connection with USER command [${this.botId}]`);
+                    } else {
+                        reject(new Error("No hash available for activation"));
+                    }
+                } else {
+                    reject(new Error("Invalid registration data for activation"));
+                }
+            } catch (err) {
+                console.error("Error during warm connection activation:", err);
+                this.authenticating = false;
+                clearTimeout(this.connectionTimeout);
+                reject(err);
+            }
+        });
         },
         
         cleanup: function(sendQuit = false) {
