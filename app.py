@@ -26,7 +26,8 @@ def write_config(data, form_number):
         "stopDefenceTime": int(data[f'stopDefenceTime{form_number}']),
         "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
         "planetName": data[f'PlanetName{form_number}'],
-        "rival": data[f'Rival{form_number}'].split(',')
+        "rival": data[f'Rival{form_number}'].split(','),
+        "standOnEnemy": bool(data[f'standOnEnemy{form_number}'])
     }
     config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
     with open(config_path, 'w') as f:
@@ -56,7 +57,8 @@ def start_galaxy(form_number):
             'stopDefenceTime': 'stopDefenceTime',
             'defenceIntervalTime': 'defenceIntervalTime',
             'PlanetName': 'planetName',
-            'Rival': 'rival'
+            'Rival': 'rival',
+            'standOnEnemy': 'standOnEnemy'
         }
 
         # Add -- to specify arguments for the script
@@ -91,7 +93,8 @@ def update_galaxy(form_number):
             "stopDefenceTime": int(data[f'stopDefenceTime{form_number}']),
             "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
             "planetName": data[f'PlanetName{form_number}'],
-            "rival": data[f'Rival{form_number}'].split(',')
+            "rival": data[f'Rival{form_number}'].split(','),
+            "standOnEnemy": bool(data[f'standOnEnemy{form_number}'])
         }
         config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
         with open(config_path, 'w') as f:
