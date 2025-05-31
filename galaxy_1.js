@@ -7,17 +7,17 @@ const https = require('https');
 const { URL } = require('url');
 
 // Optimized Connection Pool Settings
-const POOL_MIN_SIZE = 2;
-const POOL_MAX_SIZE = 2;
-const POOL_TARGET_SIZE = 2;
+const POOL_MIN_SIZE = 1
+const POOL_MAX_SIZE = 1;
+const POOL_TARGET_SIZE = 1;
 const POOL_HEALTH_CHECK_INTERVAL = 10000; // 10 seconds for frequent checks
 const CONNECTION_MAX_AGE = 2 * 60 * 1000; // 2 minutes
 const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
 
 // Prison Pool Settings
-const PRISON_POOL_MIN_SIZE = 1;
-const PRISON_POOL_MAX_SIZE = 10;
-const PRISON_POOL_TARGET_SIZE = 2;
+const PRISON_POOL_MIN_SIZE = 3;
+const PRISON_POOL_MAX_SIZE = 5;
+const PRISON_POOL_TARGET_SIZE = 3;
 const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000; // 1 minute for rapid turnover
 
 let poolMaintenanceInProgress = false;
@@ -32,13 +32,25 @@ let reconnectAttempt = 0;
 let currentMode = null;
 
 // Connection pool settings
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS =  5;
 const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
 const connectionPool = [];
 let activeConnection = null;
 
 // Prison pool settings
 const prisonConnectionPool = [];
+
+let attackTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
+
+let defenseTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
 
 // Connection states
 const CONNECTION_STATES = {
@@ -55,6 +67,15 @@ let currentAttackTime;
 let currentDefenceTime;
 let monitoringMode = true;
 
+function initializeTimingStates() {
+    attackTimingState.currentTime = config.startAttackTime;
+    defenseTimingState.currentTime = config.startDefenceTime;
+    console.log("Timing states initialized:", {
+        attack: attackTimingState.currentTime,
+        defense: defenseTimingState.currentTime
+    });
+}
+
 function updateConfigValues() {
     try {
         delete require.cache[require.resolve('./config1.json')];
@@ -62,20 +83,34 @@ function updateConfigValues() {
         rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
         recoveryCode = config.RC;
         
-        currentAttackTime = config.startAttackTime;
-        currentDefenceTime = config.startDefenceTime;
+        // Initialize timing states instead of individual variables
+        initializeTimingStates();
         
         console.log("Configuration updated:", { 
             rivalNames, 
             recoveryCode,
-            attackSettings: { start: config.startAttackTime, stop: config.stopAttackTime, interval: config.attackIntervalTime, current: currentAttackTime },
-            defenceSettings: { start: config.startDefenceTime, stop: config.stopDefenceTime, interval: config.defenceIntervalTime, current: currentDefenceTime }
+            standOnEnemy: config.standOnEnemy,
+            attackSettings: { 
+                start: config.startAttackTime, 
+                stop: config.stopAttackTime, 
+                interval: config.attackIntervalTime, 
+                current: attackTimingState.currentTime 
+            },
+            defenseSettings: { 
+                start: config.startDefenceTime, 
+                stop: config.stopDefenceTime, 
+                interval: config.defenceIntervalTime, 
+                current: defenseTimingState.currentTime 
+            }
         });
+        
+        // Debug the timing states after config update
+        debugTimingStates();
+        
     } catch (error) {
         console.error("Error updating config:", error);
     }
 }
-
 updateConfigValues();
 
 fsSync.watch('config1.json', (eventType) => {
@@ -90,6 +125,46 @@ function genHash(code) {
     let str = hash.toString(CryptoJS.enc.Hex);
     str = str.split("").reverse().join("0").substr(5, 10);
     return str;
+}
+
+function incrementTiming(mode, errorType = 'success') {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? attackTimingState : defenseTimingState;
+    const configStart = isAttack ? config.startAttackTime : config.startDefenceTime;
+    const configStop = isAttack ? config.stopAttackTime : config.stopDefenceTime;
+    const configInterval = isAttack ? config.attackIntervalTime : config.defenceIntervalTime;
+    
+    // Only increment consecutive errors for actual errors
+    if (errorType !== 'success') {
+        timingState.consecutiveErrors++;
+    } else {
+        // Reset error count on successful action
+        timingState.consecutiveErrors = 0;
+    }
+    
+    // Calculate new timing
+    const oldTime = timingState.currentTime;
+    timingState.currentTime += configInterval;
+    
+    // Reset if exceeding maximum
+    if (timingState.currentTime > configStop) {
+        timingState.currentTime = configStart;
+        timingState.consecutiveErrors = 0; // Reset error count on cycle
+        console.log(`${mode} timing cycled back to start: ${timingState.currentTime}ms`);
+    } else {
+        console.log(`${mode} timing incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
+    }
+    
+    timingState.lastMode = mode;
+    return timingState.currentTime;
+}
+
+function getCurrentTiming(mode) {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? attackTimingState : defenseTimingState;
+    
+    // Return current timing or default if not set
+    return timingState.currentTime || (isAttack ? config.startAttackTime : config.startDefenceTime);
 }
 
 async function optimizedConnectionPoolMaintenance() {
@@ -146,7 +221,7 @@ async function createPoolConnections(count) {
         const conn = createConnection();
         creationPromises.push((async () => {
             try {
-                console.log(`Initializing pool connection ${i+1}/${count}`);
+                console.log(`Initializing pool connection ${(i+1)}/${count}`);
                 await conn.initialize(true);
                 if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
                     connectionPool.push(conn);
@@ -186,7 +261,7 @@ async function optimizedPrisonPoolMaintenance() {
             const age = now - conn.createdAt;
             const idleTime = now - conn.lastUsed;
             
-            if (age > PRISON_CONNECTION_MAX_AGE || idleTime > CONNECTION_IDLE_TIMEOUT || 
+            if (age > PRISON_CONNECTION_MAX_AGE  || idleTime > CONNECTION_IDLE_TIMEOUT || 
                 (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY) || !conn.registrationData) {
                 console.log(`Pruning PRISON connection ${conn.botId || 'none'} (Age: ${Math.round(age/1000)}s)`);
                 conn.cleanup();
@@ -547,8 +622,6 @@ function createConnection() {
                         this.send("MYADDONS 0 0");
                         this.send("PHONE 0 0 0 2 :Node.js");
                         this.send("JOIN");
-                        currentAttackTime = config.startAttackTime;
-                        currentDefenceTime = config.startDefenceTime;
                         this.state = CONNECTION_STATES.READY;
                         this.authenticating = false;
                         this.userCommandRetryCount = 0;
@@ -573,75 +646,115 @@ function createConnection() {
                             const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
                             if (isReleasedFromPrison) {
                                 console.log(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
+                                
+                                // PARALLEL EXECUTION - Start both JOIN and HTTP request simultaneously
                                 const parallelTasks = [];
+                                
+                                // Task 1: JOIN command with minimal delay
                                 const joinTask = new Promise((resolve, reject) => {
                                     let joinAttempts = 0;
                                     const maxJoinAttempts = 10;
+                                    
                                     const attemptJoin = () => {
                                         joinAttempts++;
                                         console.log(`JOIN attempt ${joinAttempts}/${maxJoinAttempts} for ${this.botId}`);
+                                        
+                                        // Set up listener for KICK message with 3-second rule
                                         const kickListener = (event) => {
-                                            const msg = event.data.toString().trim();
-                                            console.log(`JOIN attempt ${joinAttempts} received: ${msg}`);
-                                            if (msg.includes("KICK") && msg.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+                                            const message = event.data.toString().trim();
+                                            console.log(`JOIN attempt ${joinAttempts} received: ${message}`);
+                                            
+                                            // Check for the specific 3-second rule KICK message
+                                            if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+                                                console.log(`🚫 3-second rule detected on JOIN attempt ${joinAttempts}`);
                                                 this.socket.removeEventListener('message', kickListener);
                                                 if (joinAttempts < maxJoinAttempts) {
                                                     console.log(`⏳ Retrying JOIN in 200ms... (attempt ${joinAttempts + 1}/${maxJoinAttempts})`);
-                                                    setTimeout(attemptJoin, 200);
+                                                    setTimeout(() => {
+                                                        attemptJoin();
+                                                    }, 200); // Wait 200ms before retry
                                                 } else {
+                                                    console.log(`❌ Max JOIN attempts (${maxJoinAttempts}) reached for ${this.botId}`);
                                                     reject(new Error(`JOIN failed after ${maxJoinAttempts} attempts due to 3-second rule`));
                                                 }
-                                            } else if (msg.includes("JOIN") && !msg.includes("KICK")) {
+                                            } else if (message.includes("JOIN") && !message.includes("KICK")) {
+                                                // Successful JOIN detected
                                                 console.log(`✅ JOIN successful for ${this.botId} on attempt ${joinAttempts}`);
                                                 this.socket.removeEventListener('message', kickListener);
                                                 resolve('join_complete');
                                             }
                                         };
+                                        
+                                        // Add listener before sending JOIN
                                         this.socket.addEventListener('message', kickListener);
+                                        
+                                        // Send JOIN command
                                         setTimeout(() => {
                                             this.send(`JOIN ${config.planetName}`);
                                             console.log(`JOIN command sent for ${this.botId} (attempt ${joinAttempts})`);
+                                            
+                                            // Set timeout for this attempt (in case no response)
                                             setTimeout(() => {
                                                 if (joinAttempts === maxJoinAttempts) {
                                                     this.socket.removeEventListener('message', kickListener);
-                                                    resolve('join_timeout');
+                                                    resolve('join_timeout'); // Don't fail the entire process
                                                 }
-                                            }, 3000);
-                                        }, joinAttempts === 1 ? 0 : 100);
+                                            }, 5000); // 5 second timeout per attempt
+                                        }, joinAttempts === 1 ? 2000 : 100); // First attempt after 2s, subsequent attempts after 100ms
                                     };
+                                    
+                                    // Start the first attempt
                                     attemptJoin();
                                 });
                                 parallelTasks.push(joinTask);
+                                
+                                // Task 2: HTTP jail_free request (if we have the data ready)
                                 if (this.password) {
-                                    const httpTask = performJailFreeWithRetry(this, 3, 500)
-                                        .then(() => 'http_complete')
+                                    const httpTask = performJailFreeWithRetry(this, 3, 1000)
+                                        .then(() => {
+                                            console.log(`HTTP jail_free completed for ${this.botId}`);
+                                            return 'http_complete';
+                                        })
                                         .catch(error => {
                                             console.error(`HTTP jail_free failed for ${this.botId}:`, error.message);
                                             return 'http_failed';
                                         });
                                     parallelTasks.push(httpTask);
                                 }
+                                
+                                // Execute all tasks in parallel and handle completion
                                 Promise.allSettled(parallelTasks).then((results) => {
                                     console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
+                                    
+                                    // Short delay then QUIT for fast relogin
                                     setTimeout(() => {
                                         console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
                                         this.send("QUIT");
                                         this.prisonState = 'IDLE';
+                                        
+                                        // Clean up and trigger fast reconnection
                                         this.cleanup();
-                                        if (activeConnection === this) activeConnection = null;
+                                        if (activeConnection === this) {
+                                            activeConnection = null;
+                                        }
+                                        
+                                        // Use dedicated prison connection pool for fastest reconnect
                                         console.log("⚡ Using dedicated prison connection for relogin");
                                         Promise.resolve().then(async () => {
                                             try {
                                                 console.time('prisonRelogin');
-                                                await getPrisonConnection();
+                                                await getPrisonConnection(); // Use dedicated prison pool
                                                 console.timeEnd('prisonRelogin');
                                                 console.log(`✅ Fast prison relogin completed`);
                                             } catch (error) {
                                                 console.error("Failed to get prison connection:", error.message || error);
-                                                getConnection(true).catch(retryError => console.error("Prison relogin fallback failed:", retryError.message || retryError));
+                                                // Fallback to regular connection
+                                                getConnection(true).catch(retryError => {
+                                                    console.error("Prison relogin fallback failed:", retryError.message || retryError);
+                                                });
                                             }
                                         });
-                                    }, 1000);
+                                    }, 3000); // Reduced QUIT delay
                                 });
                             }
                         }
@@ -692,14 +805,19 @@ function createConnection() {
                         break;
                     case "850":
                         if (payload.includes("3 секунд(ы)")) {
-                            if (currentMode === 'attack') {
-                                currentAttackTime += config.attackIntervalTime;
-                                if (currentAttackTime > config.stopAttackTime) currentAttackTime = config.startAttackTime;
-                                console.log(`Hit 3-second rule in attack mode, increased attack time to: ${currentAttackTime}ms`);
-                            } else if (currentMode === 'defence') {
-                                currentDefenceTime += config.defenceIntervalTime;
-                                if (currentDefenceTime > config.stopDefenceTime) currentDefenceTime = config.startDefenceTime;
-                                console.log(`Hit 3-second rule in defence mode, increased defence time to: ${currentDefenceTime}ms`);
+                            console.log(`850 error detected in mode: ${currentMode}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, '3second');
+                                console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+                            } else {
+                                console.log(`850 error but no active mode, current mode: ${currentMode}`);
+                            }
+                        } else {
+                            // Handle other 850 errors that might affect timing
+                            console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, 'general_error');
+                                console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
                             }
                         }
                         break;
@@ -743,21 +861,25 @@ function createConnection() {
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
                     }, 1000);
+
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
                         this.botId = parts[1];
                         this.password = parts[2];
                         this.nick = parts[3];
                         if (this.hash) {
-                            this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                            console.log(`Activated warm connection with USER command [${this.botId}]`);
-                            const originalOnMessage = this.socket.onmessage;
-                            this.socket.onmessage = (event) => {
+                            let authenticationComplete = false;
+
+                            // Set up one-time authentication handler
+                            let authHandler = (event) => {
                                 const message = event.data.toString().trim();
-                                console.log(`Activation received: ${message}`);
-                                if (message.startsWith("999")) {
+                                if (message.startsWith("999") && !authenticationComplete) {
+                                    authenticationComplete = true;
+                                    // Remove this temporary handler
+                                    this.socket.removeEventListener('message', authHandler);
+                                    
                                     this.state = CONNECTION_STATES.AUTHENTICATED;
-                                    console.log(`Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                    console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
                                     this.send("FWLISTVER 0");
                                     this.send("ADDONS 0 0");
                                     this.send("MYADDONS 0 0");
@@ -767,14 +889,20 @@ function createConnection() {
                                     this.authenticating = false;
                                     this.userCommandRetryCount = 0;
                                     reconnectAttempt = 0;
+                                    
                                     if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
-                                    console.log(`⚡ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
-                                    this.socket.onmessage = originalOnMessage;
+                                    console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                    
                                     resolve(this);
-                                    return;
                                 }
-                                if (originalOnMessage) originalOnMessage(event);
                             };
+
+                            // Add the temporary auth handler
+                            this.socket.addEventListener('message', authHandler);
+                            
+                            // Send USER command
+                            this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                            console.log(`Activated warm connection with USER command [${this.botId}]`);
                         } else {
                             reject(new Error("No hash available for activation"));
                         }
@@ -826,51 +954,109 @@ function parse353(message, connection) {
     console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
     console.log(`Parsed payload: ${payload}`);
     
-    const tokens = payload.split(' ');
+    // Split tokens while preserving Unicode characters
+    const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     let i = 0;
     let detectedRivals = [];
     
     while (i < tokens.length) {
         let token = tokens[i];
+        // Skip separators like '-'
+        if (token === '-') {
+            console.log(`Skipping separator token: "${token}"`);
+            i++;
+            continue;
+        }
+        
         let name = token;
         let hasPrefix = false;
+        // Handle prefixes (@ or +) for names, including Unicode names
         if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
             name = token.substring(1);
             hasPrefix = true;
         }
+        // Validate name to include Unicode characters
+        if (!/^[a-zA-Z0-9_]+$/.test(name) && !/^[^\x00-\x7F]+$/.test(name)) {
+            console.log(`Skipping invalid name: "${name}"`);
+            i++;
+            continue;
+        }
         console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
         i++;
-        if (i < tokens.length && !isNaN(tokens[i]) && tokens[i] !== '') {
+        
+        // Look for the next valid ID (numeric token longer than 5 characters to avoid coordinates)
+        if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
             const id = tokens[i];
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
+            
             if (rivalNames.includes(name)) {
-                detectedRivals.push(name);
+                detectedRivals.push({ name, id });
                 console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+                
+                if (config.standOnEnemy) {
+                    let coordinate = null;
+                    // Look for coordinate after '@' within a reasonable range
+                    for (let j = i + 1; j < tokens.length; j++) {
+                        if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
+                            coordinate = tokens[j + 5];
+                            console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
+                            break;
+                        }
+                    }
+                    if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                        connection.send(`REMOVE ${coordinate}`);
+                    } else if (coordinate) {
+                        console.log(`Storing rival ${name} with coordinate ${coordinate} for later processing [${connection.botId}]`);
+                        pendingRivals.push({ name, id, coordinate });
+                    }
+                }
             }
             i++;
         } else {
             if (rivalNames.includes(name)) {
                 console.log(`⚠️ Found rival name "${name}" without immediate ID`);
                 let foundId = null;
-                for (let j = i; j < Math.min(i + 10, tokens.length); j++) {
-                    if (!isNaN(tokens[j]) && tokens[j] !== '' && tokens[j].length > 5) {
+                let coordinate = null;
+                // Look ahead for ID and coordinate within a reasonable range
+                for (let j = i; j < Math.min(i + 15, tokens.length); j++) {
+                    if (/^\d+$/.test(tokens[j]) && tokens[j].length > 5) {
                         foundId = tokens[j];
+                        for (let k = j + 1; k < tokens.length; k++) {
+                            if (tokens[k] === '@' && k + 5 < tokens.length && /^\d+$/.test(tokens[k + 5])) {
+                                coordinate = tokens[k + 5];
+                                console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
+                                break;
+                            }
+                        }
                         break;
                     }
                 }
                 if (foundId) {
                     userMap[name] = foundId;
-                    detectedRivals.push(name);
+                    detectedRivals.push({ name, id: foundId });
                     console.log(`✅ Found rival [${connection.botId}]: ${name} with delayed ID ${foundId}`);
+                    
+                    if (config.standOnEnemy && coordinate && connection.state === CONNECTION_STATES.READY) {
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                        connection.send(`REMOVE ${coordinate}`);
+                    } else if (config.standOnEnemy && coordinate) {
+                        console.log(`Storing rival ${name} with coordinate ${coordinate} for later processing [${connection.botId}]`);
+                        pendingRivals.push({ name, id: foundId, coordinate });
+                    }
                 }
             }
+            i++;
         }
     }
     
-    if (detectedRivals.length > 0) {
-        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.join(', ')} - Defence mode activated`);
+    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
         handleRivals(detectedRivals, 'defence', connection);
+    } else if (detectedRivals.length > 0) {
+        console.log(`Detected rivals in 353 but connection not READY (state: ${connection.state}), storing for later [${connection.botId}]`);
+        pendingRivals.push(...detectedRivals);
     } else {
         console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
         console.log(`Available names in userMap: ${Object.keys(userMap).join(', ')}`);
@@ -886,7 +1072,25 @@ function handleJoinCommand(parts, connection) {
         console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
         if (rivalNames.includes(name)) {
             console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
-            handleRivals([name], 'attack', connection);
+            
+            // Check for standOnEnemy and extract coordinate if present
+            let coordinate = null;
+            if (config.standOnEnemy) {
+                // Look for @ followed by 5 numbers, take the 5th as coordinate
+                for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
+                    if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
+                        coordinate = parts[i + 5];
+                        console.log(`Found coordinate ${coordinate} for rival ${name} in JOIN message`);
+                        break;
+                    }
+                }
+                if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                    console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                    connection.send(`REMOVE ${coordinate}`);
+                }
+            }
+            
+            handleRivals([{ name, id }], 'attack', connection);
         }
     }
 }
@@ -984,7 +1188,7 @@ async function performJailFreeFast(connection) {
     });
 }
 
-async function performJailFreeWithRetry(connection, maxRetries = 3, retryDelay = 500) {
+async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay = 500) {
     const userID = connection.botId;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
@@ -1015,30 +1219,36 @@ async function handleRivals(rivals, mode, connection) {
     }
     
     currentMode = mode;
-    const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
+    const waitTime = getCurrentTiming(mode);
     console.log(`Handling rivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
+    console.log(`Timing state - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
+    
     monitoringMode = false;
     
     for (const rival of rivals) {
-        const id = userMap[rival];
+        const id = userMap[rival.name];
         if (id) {
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) [${connection.botId}]`);
+                    console.log(`Sending ACTION 3 to ${rival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
-            console.log(`Actions sent to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+            console.log(`Actions sent to ${rival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
         }
     }
     
+    // FIX: Increment timing after sending actions (assuming success)
+    const newTiming = incrementTiming(mode, 'success');
+    console.log(`✅ ${mode} timing incremented after actions: ${newTiming}ms`);
+    
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
-    connection.cleanup(true); // Send QUIT before closing
+    connection.cleanup(true);
     if (activeConnection === connection) activeConnection = null;
     monitoringMode = true;
     
-    console.log("⚡ Actions completed, waiting 500ms before activating new connection");
+    console.log("⚡ Actions completed, waiting 1500ms before activating new connection");
     setTimeout(() => {
         Promise.resolve().then(async () => {
             try {
@@ -1078,7 +1288,7 @@ async function handlePrisonAutomation(connection) {
     } catch (error) {
         console.error(`Error during prison automation for connection ${connection.botId}:`, error);
         connection.prisonState = 'IDLE';
-        if (connection.prisonTimeout) clearTimeout(connection.prisonTimeout);
+        if (connection.prisonTimeout) clearTimeout(this.prisonTimeout);
     }
 }
 
@@ -1104,6 +1314,10 @@ setInterval(() => {
     const healthyPrison = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
     console.log(`📊 Optimized Pool Status - Regular: ${healthyRegular}/${connectionPool.length} (target: ${POOL_TARGET_SIZE}), Prison: ${healthyPrison}/${prisonConnectionPool.length} (target: ${PRISON_POOL_TARGET_SIZE})`);
 }, 30000);
+
+setInterval(() => {
+    console.log(`📊 Timing States - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
+}, 60000);
 
 async function recoverUser(password) {
     console.log("Starting recovery with code:", password);
@@ -1163,3 +1377,7 @@ process.on('unhandledRejection', (reason, promise) => {
         else getConnection(true).catch(err => console.error("Failed to get new connection after unhandled rejection:", err.message || err));
     }, 500);
 });
+
+function debugTimingStates() {
+    console.log(`Debug Timing States - Attack: ${attackTimingState.currentTime}ms (lastMode: ${attackTimingState.lastMode}, errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (lastMode: ${defenseTimingState.lastMode}, errors: ${defenseTimingState.consecutiveErrors})`);
+}
