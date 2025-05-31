@@ -954,10 +954,25 @@ function parse353(message, connection) {
     console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
     console.log(`Parsed payload: ${payload}`);
     
-    // Split tokens while preserving Unicode characters
+    // Enhanced tokenization to handle all special characters including backticks
+    // First, let's also check the entire payload for rival names before tokenizing
+    console.log(`Checking payload for rival names: ${payload}`);
+    
+    // Check if any rival names exist in the payload (case-sensitive exact match)
+    const payloadContainsRivals = rivalNames.filter(rivalName => {
+        const found = payload.includes(rivalName);
+        if (found) {
+            console.log(`🎯 Found rival name "${rivalName}" in payload`);
+        }
+        return found;
+    });
+    
+    // Split tokens while preserving ALL special characters including backticks
     const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     let i = 0;
     let detectedRivals = [];
+    
+    console.log(`Tokenized payload into: [${tokens.join(', ')}]`);
     
     while (i < tokens.length) {
         let token = tokens[i];
@@ -975,13 +990,29 @@ function parse353(message, connection) {
             name = token.substring(1);
             hasPrefix = true;
         }
-        // Validate name to include Unicode characters
-        if (!/^[a-zA-Z0-9_]+$/.test(name) && !/^[^\x00-\x7F]+$/.test(name)) {
-            console.log(`Skipping invalid name: "${name}"`);
+        
+        // Much more permissive validation - only reject truly invalid tokens
+        if (name.length === 0) {
+            console.log(`Skipping empty name`);
             i++;
             continue;
         }
+        
+        // Skip obvious separators and non-name tokens
+        if (name === '-' || name === '@' || name === '+') {
+            console.log(`Skipping separator token: "${name}"`);
+            i++;
+            continue;
+        }
+        
         console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
+        
+        // Check if this name exactly matches any rival name
+        const isRivalName = rivalNames.includes(name);
+        if (isRivalName) {
+            console.log(`🎯 Exact rival match found: "${name}"`);
+        }
+        
         i++;
         
         // Look for the next valid ID (numeric token longer than 5 characters to avoid coordinates)
@@ -990,7 +1021,7 @@ function parse353(message, connection) {
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
             
-            if (rivalNames.includes(name)) {
+            if (isRivalName) {
                 detectedRivals.push({ name, id });
                 console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
                 
@@ -1015,7 +1046,7 @@ function parse353(message, connection) {
             }
             i++;
         } else {
-            if (rivalNames.includes(name)) {
+            if (isRivalName) {
                 console.log(`⚠️ Found rival name "${name}" without immediate ID`);
                 let foundId = null;
                 let coordinate = null;
@@ -1045,9 +1076,32 @@ function parse353(message, connection) {
                         console.log(`Storing rival ${name} with coordinate ${coordinate} for later processing [${connection.botId}]`);
                         pendingRivals.push({ name, id: foundId, coordinate });
                     }
+                } else {
+                    // If no ID found immediately after, try alternative parsing methods
+                    console.log(`No ID found for rival ${name}, trying alternative parsing...`);
+                    
+                    // Try to find the rival name and ID pair anywhere in the remaining tokens
+                    for (let j = 0; j < tokens.length - 1; j++) {
+                        let currentToken = tokens[j];
+                        let nextToken = tokens[j + 1];
+                        
+                        // Remove prefixes for comparison
+                        if (currentToken.startsWith('@') || currentToken.startsWith('+')) {
+                            currentToken = currentToken.substring(1);
+                        }
+                        
+                        // Check if current token matches our rival name and next token is a valid ID
+                        if (currentToken === name && /^\d+$/.test(nextToken) && nextToken.length > 5) {
+                            userMap[name] = nextToken;
+                            detectedRivals.push({ name, id: nextToken });
+                            console.log(`✅ Found rival via alternative parsing [${connection.botId}]: ${name} with ID ${nextToken}`);
+                            break;
+                        }
+                    }
                 }
             }
-            i++;
+            
+            // Continue processing regardless of whether this was a rival name or not
         }
     }
     
