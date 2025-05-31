@@ -960,6 +960,13 @@ function parse353(message, connection) {
     
     while (i < tokens.length) {
         let token = tokens[i];
+        // Skip separators like '-'
+        if (token === '-') {
+            console.log(`Skipping separator token: "${token}"`);
+            i++;
+            continue;
+        }
+        
         let name = token;
         let hasPrefix = false;
         if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
@@ -968,18 +975,19 @@ function parse353(message, connection) {
         }
         console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
         i++;
-        if (i < tokens.length && !isNaN(tokens[i]) && tokens[i] !== '') {
+        
+        // Look for the next valid ID (numeric token longer than 5 characters to avoid coordinates)
+        if (i < tokens.length && !isNaN(tokens[i]) && tokens[i] !== '' && tokens[i].length > 5) {
             const id = tokens[i];
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
+            
             if (rivalNames.includes(name)) {
                 detectedRivals.push({ name, id });
                 console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
                 
-                // Check for standOnEnemy and extract coordinate if present
                 if (config.standOnEnemy) {
                     let coordinate = null;
-                    // Look for @ followed by 5 numbers, take the 5th as coordinate
                     for (let j = i + 1; j < tokens.length; j++) {
                         if (tokens[j] === '@' && j + 5 < tokens.length && !isNaN(tokens[j + 5])) {
                             coordinate = tokens[j + 5];
@@ -990,6 +998,9 @@ function parse353(message, connection) {
                     if (coordinate && connection.state === CONNECTION_STATES.READY) {
                         console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
                         connection.send(`REMOVE ${coordinate}`);
+                    } else if (coordinate) {
+                        console.log(`Storing rival ${name} with coordinate ${coordinate} for later processing [${connection.botId}]`);
+                        pendingRivals.push({ name, id, coordinate });
                     }
                 }
             }
@@ -1002,7 +1013,6 @@ function parse353(message, connection) {
                 for (let j = i; j < Math.min(i + 10, tokens.length); j++) {
                     if (!isNaN(tokens[j]) && tokens[j] !== '' && tokens[j].length > 5) {
                         foundId = tokens[j];
-                        // Look for @ after the ID to find coordinate
                         for (let k = j + 1; k < tokens.length; k++) {
                             if (tokens[k] === '@' && k + 5 < tokens.length && !isNaN(tokens[k + 5])) {
                                 coordinate = tokens[k + 5];
@@ -1021,15 +1031,22 @@ function parse353(message, connection) {
                     if (config.standOnEnemy && coordinate && connection.state === CONNECTION_STATES.READY) {
                         console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
                         connection.send(`REMOVE ${coordinate}`);
+                    } else if (config.standOnEnemy && coordinate) {
+                        console.log(`Storing rival ${name} with coordinate ${coordinate} for later processing [${connection.botId}]`);
+                        pendingRivals.push({ name, id: foundId, coordinate });
                     }
                 }
             }
+            i++;
         }
     }
     
-    if (detectedRivals.length > 0) {
+    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
         console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
         handleRivals(detectedRivals, 'defence', connection);
+    } else if (detectedRivals.length > 0) {
+        console.log(`Detected rivals in 353 but connection not READY (state: ${connection.state}), storing for later [${connection.botId}]`);
+        pendingRivals.push(...detectedRivals);
     } else {
         console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
         console.log(`Available names in userMap: ${Object.keys(userMap).join(', ')}`);
