@@ -639,14 +639,14 @@ function createConnection() {
                         if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
                         break;
                     case "KICK":
-                        if (payload && (payload.includes("fast") || payload.includes("быстр") || 
-                                    payload.includes("секунд") || payload.includes("second"))) {
-                            console.log(`Timing-related error detected: ${message}`);
-                            if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, 'timing_error');
-                                console.log(`Adjusted ${currentMode} timing due to timing error: ${newTiming}ms`);
-                            }
-                        }
+                        // if (payload && (payload.includes("fast") || payload.includes("быстр") || 
+                        //             payload.includes("секунд") || payload.includes("second"))) {
+                        //     console.log(`Timing-related error detected: ${message}`);
+                        //     if (currentMode === 'attack' || currentMode === 'defence') {
+                        //         const newTiming = incrementTiming(currentMode, 'timing_error');
+                        //         console.log(`Adjusted ${currentMode} timing due to timing error: ${newTiming}ms`);
+                        //     }
+                        // }
                         console.log(`🔓 KICK command detected: ${message}`);
                         if (parts.length >= commandIndex + 3) {
                             const kickedUserId = parts[commandIndex + 2];
