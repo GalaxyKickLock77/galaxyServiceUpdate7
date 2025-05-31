@@ -7,7 +7,7 @@ const https = require('https');
 const { URL } = require('url');
 
 // Optimized Connection Pool Settings
-const POOL_MIN_SIZE = 1;
+const POOL_MIN_SIZE = 1
 const POOL_MAX_SIZE = 1;
 const POOL_TARGET_SIZE = 1;
 const POOL_HEALTH_CHECK_INTERVAL = 10000; // 10 seconds for frequent checks
@@ -32,7 +32,7 @@ let reconnectAttempt = 0;
 let currentMode = null;
 
 // Connection pool settings
-const MAX_RECONNECT_ATTEMPTS = 5;
+const MAX_RECONNECT_ATTEMPTS =  5;
 const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
 const connectionPool = [];
 let activeConnection = null;
@@ -89,6 +89,7 @@ function updateConfigValues() {
         console.log("Configuration updated:", { 
             rivalNames, 
             recoveryCode,
+            standOnEnemy: config.standOnEnemy,
             attackSettings: { 
                 start: config.startAttackTime, 
                 stop: config.stopAttackTime, 
@@ -157,6 +158,7 @@ function incrementTiming(mode, errorType = 'success') {
     timingState.lastMode = mode;
     return timingState.currentTime;
 }
+
 function getCurrentTiming(mode) {
     const isAttack = mode === 'attack';
     const timingState = isAttack ? attackTimingState : defenseTimingState;
@@ -164,7 +166,6 @@ function getCurrentTiming(mode) {
     // Return current timing or default if not set
     return timingState.currentTime || (isAttack ? config.startAttackTime : config.startDefenceTime);
 }
-
 
 async function optimizedConnectionPoolMaintenance() {
     if (poolMaintenanceInProgress) {
@@ -639,14 +640,6 @@ function createConnection() {
                         if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
                         break;
                     case "KICK":
-                        // if (payload && (payload.includes("fast") || payload.includes("быстр") || 
-                        //             payload.includes("секунд") || payload.includes("second"))) {
-                        //     console.log(`Timing-related error detected: ${message}`);
-                        //     if (currentMode === 'attack' || currentMode === 'defence') {
-                        //         const newTiming = incrementTiming(currentMode, 'timing_error');
-                        //         console.log(`Adjusted ${currentMode} timing due to timing error: ${newTiming}ms`);
-                        //     }
-                        // }
                         console.log(`🔓 KICK command detected: ${message}`);
                         if (parts.length >= commandIndex + 3) {
                             const kickedUserId = parts[commandIndex + 2];
@@ -811,23 +804,23 @@ function createConnection() {
                         }
                         break;
                     case "850":
-                if (payload.includes("3 секунд(ы)")) {
-                    console.log(`850 error detected in mode: ${currentMode}`);
-                    if (currentMode === 'attack' || currentMode === 'defence') {
-                        const newTiming = incrementTiming(currentMode, '3second');
-                        console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
-                    } else {
-                        console.log(`850 error but no active mode, current mode: ${currentMode}`);
-                    }
-                } else {
-                    // Handle other 850 errors that might affect timing
-                    console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
-                    if (currentMode === 'attack' || currentMode === 'defence') {
-                        const newTiming = incrementTiming(currentMode, 'general_error');
-                        console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
-                    }
-                }
-                break;
+                        if (payload.includes("3 секунд(ы)")) {
+                            console.log(`850 error detected in mode: ${currentMode}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, '3second');
+                                console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+                            } else {
+                                console.log(`850 error but no active mode, current mode: ${currentMode}`);
+                            }
+                        } else {
+                            // Handle other 850 errors that might affect timing
+                            console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, 'general_error');
+                                console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
+                            }
+                        }
+                        break;
                 }
                 
                 if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
@@ -855,74 +848,74 @@ function createConnection() {
         },
         
         activateWarmConnection: function() {
-        return new Promise((resolve, reject) => {
-            try {
-                if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
-                    reject(new Error("Cannot activate connection that isn't properly warmed up"));
-                    return;
-                }
-                console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
-                this.authenticating = true;
-                this.connectionTimeout = setTimeout(() => {
-                    console.log("Connection activation timeout");
-                    this.authenticating = false;
-                    reject(new Error("Connection activation timeout"));
-                }, 1000);
-
-                const parts = this.registrationData.split(/\s+/);
-                if (parts.length >= 4) {
-                    this.botId = parts[1];
-                    this.password = parts[2];
-                    this.nick = parts[3];
-                    if (this.hash) {
-                        let authenticationComplete = false;
-
-                        // Set up one-time authentication handler
-                        let authHandler = (event) => {
-                            const message = event.data.toString().trim();
-                            if (message.startsWith("999") && !authenticationComplete) {
-                                authenticationComplete = true;
-                                // Remove this temporary handler
-                                this.socket.removeEventListener('message', authHandler);
-                                
-                                this.state = CONNECTION_STATES.AUTHENTICATED;
-                                console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
-                                this.send("FWLISTVER 0");
-                                this.send("ADDONS 0 0");
-                                this.send("MYADDONS 0 0");
-                                this.send("PHONE 0 0 0 2 :Node.js");
-                                this.send("JOIN");
-                                this.state = CONNECTION_STATES.READY;
-                                this.authenticating = false;
-                                this.userCommandRetryCount = 0;
-                                reconnectAttempt = 0;
-                                
-                                if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
-                                console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
-                                
-                                resolve(this);
-                            }
-                        };
-
-                        // Add the temporary auth handler
-                        this.socket.addEventListener('message', authHandler);
-                        
-                        // Send USER command
-                        this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                        console.log(`Activated warm connection with USER command [${this.botId}]`);
-                    } else {
-                        reject(new Error("No hash available for activation"));
+            return new Promise((resolve, reject) => {
+                try {
+                    if (this.state !== CONNECTION_STATES.HASH_RECEIVED || !this.registrationData) {
+                        reject(new Error("Cannot activate connection that isn't properly warmed up"));
+                        return;
                     }
-                } else {
-                    reject(new Error("Invalid registration data for activation"));
+                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
+                    this.authenticating = true;
+                    this.connectionTimeout = setTimeout(() => {
+                        console.log("Connection activation timeout");
+                        this.authenticating = false;
+                        reject(new Error("Connection activation timeout"));
+                    }, 1000);
+
+                    const parts = this.registrationData.split(/\s+/);
+                    if (parts.length >= 4) {
+                        this.botId = parts[1];
+                        this.password = parts[2];
+                        this.nick = parts[3];
+                        if (this.hash) {
+                            let authenticationComplete = false;
+
+                            // Set up one-time authentication handler
+                            let authHandler = (event) => {
+                                const message = event.data.toString().trim();
+                                if (message.startsWith("999") && !authenticationComplete) {
+                                    authenticationComplete = true;
+                                    // Remove this temporary handler
+                                    this.socket.removeEventListener('message', authHandler);
+                                    
+                                    this.state = CONNECTION_STATES.AUTHENTICATED;
+                                    console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                    this.send("FWLISTVER 0");
+                                    this.send("ADDONS 0 0");
+                                    this.send("MYADDONS 0 0");
+                                    this.send("PHONE 0 0 0 2 :Node.js");
+                                    this.send("JOIN");
+                                    this.state = CONNECTION_STATES.READY;
+                                    this.authenticating = false;
+                                    this.userCommandRetryCount = 0;
+                                    reconnectAttempt = 0;
+                                    
+                                    if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+                                    console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                    
+                                    resolve(this);
+                                }
+                            };
+
+                            // Add the temporary auth handler
+                            this.socket.addEventListener('message', authHandler);
+                            
+                            // Send USER command
+                            this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                            console.log(`Activated warm connection with USER command [${this.botId}]`);
+                        } else {
+                            reject(new Error("No hash available for activation"));
+                        }
+                    } else {
+                        reject(new Error("Invalid registration data for activation"));
+                    }
+                } catch (err) {
+                    console.error("Error during warm connection activation:", err);
+                    this.authenticating = false;
+                    clearTimeout(this.connectionTimeout);
+                    reject(err);
                 }
-            } catch (err) {
-                console.error("Error during warm connection activation:", err);
-                this.authenticating = false;
-                clearTimeout(this.connectionTimeout);
-                reject(err);
-            }
-        });
+            });
         },
         
         cleanup: function(sendQuit = false) {
@@ -980,31 +973,62 @@ function parse353(message, connection) {
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
             if (rivalNames.includes(name)) {
-                detectedRivals.push(name);
+                detectedRivals.push({ name, id });
                 console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+                
+                // Check for standOnEnemy and extract coordinate if present
+                if (config.standOnEnemy) {
+                    let coordinate = null;
+                    // Look for @ followed by 5 numbers, take the 5th as coordinate
+                    for (let j = i + 1; j < tokens.length; j++) {
+                        if (tokens[j] === '@' && j + 5 < tokens.length && !isNaN(tokens[j + 5])) {
+                            coordinate = tokens[j + 5];
+                            console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
+                            break;
+                        }
+                    }
+                    if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                        connection.send(`REMOVE ${coordinate}`);
+                    }
+                }
             }
             i++;
         } else {
             if (rivalNames.includes(name)) {
                 console.log(`⚠️ Found rival name "${name}" without immediate ID`);
                 let foundId = null;
+                let coordinate = null;
                 for (let j = i; j < Math.min(i + 10, tokens.length); j++) {
                     if (!isNaN(tokens[j]) && tokens[j] !== '' && tokens[j].length > 5) {
                         foundId = tokens[j];
+                        // Look for @ after the ID to find coordinate
+                        for (let k = j + 1; k < tokens.length; k++) {
+                            if (tokens[k] === '@' && k + 5 < tokens.length && !isNaN(tokens[k + 5])) {
+                                coordinate = tokens[k + 5];
+                                console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
+                                break;
+                            }
+                        }
                         break;
                     }
                 }
                 if (foundId) {
                     userMap[name] = foundId;
-                    detectedRivals.push(name);
+                    detectedRivals.push({ name, id: foundId });
                     console.log(`✅ Found rival [${connection.botId}]: ${name} with delayed ID ${foundId}`);
+                    
+                    if (config.standOnEnemy && coordinate && connection.state === CONNECTION_STATES.READY) {
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                        connection.send(`REMOVE ${coordinate}`);
+                    }
                 }
             }
         }
     }
     
     if (detectedRivals.length > 0) {
-        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.join(', ')} - Defence mode activated`);
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
         handleRivals(detectedRivals, 'defence', connection);
     } else {
         console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
@@ -1021,7 +1045,25 @@ function handleJoinCommand(parts, connection) {
         console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
         if (rivalNames.includes(name)) {
             console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
-            handleRivals([name], 'attack', connection);
+            
+            // Check for standOnEnemy and extract coordinate if present
+            let coordinate = null;
+            if (config.standOnEnemy) {
+                // Look for @ followed by 5 numbers, take the 5th as coordinate
+                for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
+                    if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
+                        coordinate = parts[i + 5];
+                        console.log(`Found coordinate ${coordinate} for rival ${name} in JOIN message`);
+                        break;
+                    }
+                }
+                if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                    console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                    connection.send(`REMOVE ${coordinate}`);
+                }
+            }
+            
+            handleRivals([{ name, id }], 'attack', connection);
         }
     }
 }
@@ -1157,16 +1199,16 @@ async function handleRivals(rivals, mode, connection) {
     monitoringMode = false;
     
     for (const rival of rivals) {
-        const id = userMap[rival];
+        const id = userMap[rival.name];
         if (id) {
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+                    console.log(`Sending ACTION 3 to ${rival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
-            console.log(`Actions sent to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+            console.log(`Actions sent to ${rival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
         }
     }
     
@@ -1193,7 +1235,6 @@ async function handleRivals(rivals, mode, connection) {
         });
     }, 1500);
 }
-
 
 async function handlePrisonAutomation(connection) {
     if (connection.prisonState !== 'IDLE') {
@@ -1309,3 +1350,7 @@ process.on('unhandledRejection', (reason, promise) => {
         else getConnection(true).catch(err => console.error("Failed to get new connection after unhandled rejection:", err.message || err));
     }, 500);
 });
+
+function debugTimingStates() {
+    console.log(`Debug Timing States - Attack: ${attackTimingState.currentTime}ms (lastMode: ${attackTimingState.lastMode}, errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (lastMode: ${defenseTimingState.lastMode}, errors: ${defenseTimingState.consecutiveErrors})`);
+}
