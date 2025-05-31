@@ -954,7 +954,8 @@ function parse353(message, connection) {
     console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
     console.log(`Parsed payload: ${payload}`);
     
-    const tokens = payload.split(' ');
+    // Split tokens while preserving Unicode characters
+    const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     let i = 0;
     let detectedRivals = [];
     
@@ -969,15 +970,22 @@ function parse353(message, connection) {
         
         let name = token;
         let hasPrefix = false;
+        // Handle prefixes (@ or +) for names, including Unicode names
         if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
             name = token.substring(1);
             hasPrefix = true;
+        }
+        // Validate name to include Unicode characters
+        if (!/^[a-zA-Z0-9_]+$/.test(name) && !/^[^\x00-\x7F]+$/.test(name)) {
+            console.log(`Skipping invalid name: "${name}"`);
+            i++;
+            continue;
         }
         console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
         i++;
         
         // Look for the next valid ID (numeric token longer than 5 characters to avoid coordinates)
-        if (i < tokens.length && !isNaN(tokens[i]) && tokens[i] !== '' && tokens[i].length > 5) {
+        if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
             const id = tokens[i];
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
@@ -988,8 +996,9 @@ function parse353(message, connection) {
                 
                 if (config.standOnEnemy) {
                     let coordinate = null;
+                    // Look for coordinate after '@' within a reasonable range
                     for (let j = i + 1; j < tokens.length; j++) {
-                        if (tokens[j] === '@' && j + 5 < tokens.length && !isNaN(tokens[j + 5])) {
+                        if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
                             coordinate = tokens[j + 5];
                             console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
                             break;
@@ -1010,11 +1019,12 @@ function parse353(message, connection) {
                 console.log(`⚠️ Found rival name "${name}" without immediate ID`);
                 let foundId = null;
                 let coordinate = null;
-                for (let j = i; j < Math.min(i + 10, tokens.length); j++) {
-                    if (!isNaN(tokens[j]) && tokens[j] !== '' && tokens[j].length > 5) {
+                // Look ahead for ID and coordinate within a reasonable range
+                for (let j = i; j < Math.min(i + 15, tokens.length); j++) {
+                    if (/^\d+$/.test(tokens[j]) && tokens[j].length > 5) {
                         foundId = tokens[j];
                         for (let k = j + 1; k < tokens.length; k++) {
-                            if (tokens[k] === '@' && k + 5 < tokens.length && !isNaN(tokens[k + 5])) {
+                            if (tokens[k] === '@' && k + 5 < tokens.length && /^\d+$/.test(tokens[k + 5])) {
                                 coordinate = tokens[k + 5];
                                 console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
                                 break;
