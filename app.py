@@ -16,6 +16,22 @@ GALAXY_BACKEND_PATH = "/galaxybackend"
 
 galaxy_processes = {1: None, 2: None, 3: None, 4: None, 5: None}
 
+def string_to_bool(value):
+    """Convert string or boolean to proper boolean value"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        # Convert to lowercase and check for true values
+        lower_value = value.lower().strip()
+        if lower_value in ('true', '1', 'yes', 'on'):
+            return True
+        elif lower_value in ('false', '0', 'no', 'off', ''):
+            return False
+        else:
+            # For any other string, return False (conservative approach)
+            return False
+    return bool(value)
+
 def write_config(data, form_number):
     config = {
         "RC1": data[f'RC1{form_number}'],
@@ -28,8 +44,8 @@ def write_config(data, form_number):
         "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
         "planetName": data[f'PlanetName{form_number}'],
         "rival": data[f'Rival{form_number}'].split(','),
-        "standOnEnemy": bool(data[f'standOnEnemy{form_number}']),
-        "actionOnEnemy": bool(data[f'actionOnEnemy{form_number}'])
+        "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
+        "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}'])
     }
     config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
     with open(config_path, 'w') as f:
@@ -99,8 +115,8 @@ def update_galaxy(form_number):
             "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
             "planetName": data[f'PlanetName{form_number}'],
             "rival": data[f'Rival{form_number}'].split(','),
-            "standOnEnemy": bool(data[f'standOnEnemy{form_number}']),
-            "actionOnEnemy": bool(data[f'actionOnEnemy{form_number}'])
+            "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
+            "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}'])
         }
         config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
         with open(config_path, 'w') as f:
