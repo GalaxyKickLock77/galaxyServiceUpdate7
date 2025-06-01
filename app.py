@@ -18,7 +18,8 @@ galaxy_processes = {1: None, 2: None, 3: None, 4: None, 5: None}
 
 def write_config(data, form_number):
     config = {
-        "RC": data[f'RC{form_number}'],
+        "RC1": data[f'RC1{form_number}'],
+        "RC2": data[f'RC2{form_number}'],
         "startAttackTime": int(data[f'startAttackTime{form_number}']),
         "stopAttackTime": int(data[f'stopAttackTime{form_number}']),
         "attackIntervalTime": int(data[f'attackIntervalTime{form_number}']),
@@ -27,7 +28,8 @@ def write_config(data, form_number):
         "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
         "planetName": data[f'PlanetName{form_number}'],
         "rival": data[f'Rival{form_number}'].split(','),
-        "standOnEnemy": bool(data[f'standOnEnemy{form_number}'])
+        "standOnEnemy": bool(data[f'standOnEnemy{form_number}']),
+        "actionOnEnemy": bool(data[f'actionOnEnemy{form_number}'])
     }
     config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
     with open(config_path, 'w') as f:
@@ -49,7 +51,8 @@ def start_galaxy(form_number):
         
         # Map config fields to command line arguments
         arg_mapping = {
-            'RC': 'RC',
+            'RC1': 'RC1',
+            'RC2': 'RC2',
             'startAttackTime': 'startAttackTime',
             'stopAttackTime': 'stopAttackTime',
             'attackIntervalTime': 'attackIntervalTime',
@@ -58,7 +61,8 @@ def start_galaxy(form_number):
             'defenceIntervalTime': 'defenceIntervalTime',
             'PlanetName': 'planetName',
             'Rival': 'rival',
-            'standOnEnemy': 'standOnEnemy'
+            'standOnEnemy': 'standOnEnemy',
+            'actionOnEnemy': 'actionOnEnemy'
         }
 
         # Add -- to specify arguments for the script
@@ -85,7 +89,8 @@ def update_galaxy(form_number):
     try:
         # Write to the specific config file for this form number
         config = {
-            "RC": data[f'RC{form_number}'],
+            "RC1": data[f'RC1{form_number}'],
+            "RC2": data[f'RC2{form_number}'],
             "startAttackTime": int(data[f'startAttackTime{form_number}']),
             "stopAttackTime": int(data[f'stopAttackTime{form_number}']),
             "attackIntervalTime": int(data[f'attackIntervalTime{form_number}']),
@@ -94,7 +99,8 @@ def update_galaxy(form_number):
             "defenceIntervalTime": int(data[f'defenceIntervalTime{form_number}']),
             "planetName": data[f'PlanetName{form_number}'],
             "rival": data[f'Rival{form_number}'].split(','),
-            "standOnEnemy": bool(data[f'standOnEnemy{form_number}'])
+            "standOnEnemy": bool(data[f'standOnEnemy{form_number}']),
+            "actionOnEnemy": bool(data[f'actionOnEnemy{form_number}'])
         }
         config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
         with open(config_path, 'w') as f:
