@@ -1,12 +1,14 @@
 {
-  "RC": "onfoqk2ff1",
-  "startAttackTime": 1475,
-  "stopAttackTime": 1500,
+    "RC1": "",
+  "RC2": "",
+  "startAttackTime": 1900,
+  "stopAttackTime": 1950,
   "attackIntervalTime": 5,
-  "startDefenceTime": 1800,
-  "stopDefenceTime": 1850,
+  "startDefenceTime": 1850,
+  "stopDefenceTime": 1925,
   "defenceIntervalTime": 5,
   "planetName": "THE_BOT",
-  "rival": ["``THALA``","[L][E][0]"],
-  "standOnEnemy": false
+  "rival": ["``THALA``"],
+  "standOnEnemy": "false",
+  "actionOnEnemy": "false"
 }
