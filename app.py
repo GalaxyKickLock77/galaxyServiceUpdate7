@@ -3,11 +3,9 @@ import subprocess
 import json
 import os
 import threading
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask_cors import CORS
 import signal
-import psutil
 import time
 
 app = Flask(__name__)
@@ -15,30 +13,24 @@ CORS(app)
 
 # Configuration
 GALAXY_BACKEND_PATH = "/galaxybackend"
-MAX_WORKERS = 10  # Thread pool size for async operations
-TIMEOUT_SECONDS = 5  # Maximum timeout for operations
+MAX_WORKERS = 8
+TIMEOUT_SECONDS = 3
 
-# Thread pool for async operations
+# Thread pool and locks
 executor = ThreadPoolExecutor(max_workers=MAX_WORKERS)
-
-# Global state management with thread-safe operations
 galaxy_processes = {i: None for i in range(1, 6)}
 process_lock = threading.RLock()
 
-# Cache for frequently accessed data
+# Ultra-fast caching
 config_cache = {}
-status_cache = {"last_update": 0, "data": {}}
+status_cache = {"time": 0, "data": {}}
 
 def string_to_bool(value):
-    """Ultra-fast boolean conversion"""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.lower().strip() in ('true', '1', 'yes', 'on')
-    return bool(value)
+    """Lightning-fast boolean conversion"""
+    return isinstance(value, str) and value.lower().strip() in ('true', '1', 'yes', 'on') if isinstance(value, str) else bool(value)
 
-def write_config_fast(data, form_number):
-    """Optimized config writing with minimal I/O"""
+def write_config_instant(data, form_number):
+    """Instant config writing with background I/O"""
     config = {
         "RC1": data[f'RC1{form_number}'],
         "RC2": data[f'RC2{form_number}'],
@@ -54,381 +46,253 @@ def write_config_fast(data, form_number):
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}'])
     }
     
-    # Cache the config for quick access
     config_cache[form_number] = config
     
-    # Write to file asynchronously
-    config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
-    
-    def write_file():
+    # Async file write
+    def write_bg():
         try:
+            config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
             with open(config_path, 'w') as f:
-                json.dump(config, f, separators=(',', ':'))  # Compact JSON
+                json.dump(config, f, separators=(',', ':'))
         except Exception as e:
-            print(f"Config write error for form {form_number}: {e}")
+            print(f"Config write error {form_number}: {e}")
     
-    # Execute file write in background thread
-    executor.submit(write_file)
+    executor.submit(write_bg)
     return config
 
-def force_kill_pm2_process(form_number):
-    """Forcefully kill PM2 process with multiple methods"""
+def nuclear_kill(form_number):
+    """Nuclear option - kill everything related to this form"""
     killed_pids = []
     
     try:
-        # Method 1: PM2 delete with force
-        result = subprocess.run(
-            ['pm2', 'delete', f'galaxy_{form_number}', '--force'],
-            cwd=GALAXY_BACKEND_PATH,
-            capture_output=True,
-            text=True,
-            timeout=2
-        )
+        # 1. PM2 force delete
+        subprocess.run(['pm2', 'delete', f'galaxy_{form_number}', '--force'], 
+                      cwd=GALAXY_BACKEND_PATH, timeout=1, capture_output=True)
         
-        # Method 2: Find and kill by name pattern
+        # 2. Pattern-based killing
         try:
-            ps_result = subprocess.run(
-                ['pgrep', '-f', f'galaxy_{form_number}.js'],
-                capture_output=True,
-                text=True,
-                timeout=1
-            )
-            
-            if ps_result.stdout.strip():
-                pids = ps_result.stdout.strip().split('\n')
+            result = subprocess.run(['pgrep', '-f', f'galaxy_{form_number}'], 
+                                  capture_output=True, text=True, timeout=1)
+            if result.stdout.strip():
+                pids = [int(p) for p in result.stdout.strip().split('\n') if p.strip().isdigit()]
                 for pid in pids:
                     try:
-                        os.kill(int(pid), signal.SIGKILL)
-                        killed_pids.append(int(pid))
+                        os.kill(pid, signal.SIGKILL)
+                        killed_pids.append(pid)
                     except:
                         pass
         except:
             pass
         
-        # Method 3: Use psutil for process hunting
+        # 3. ps-based hunting
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
-                try:
-                    if proc.info['cmdline'] and any(f'galaxy_{form_number}' in arg for arg in proc.info['cmdline']):
-                        proc.kill()
-                        killed_pids.append(proc.info['pid'])
-                except:
-                    pass
+            result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=1)
+            if result.returncode == 0:
+                for line in result.stdout.split('\n'):
+                    if f'galaxy_{form_number}' in line and ('node' in line or 'pm2' in line):
+                        parts = line.split()
+                        if len(parts) > 1 and parts[1].isdigit():
+                            try:
+                                pid = int(parts[1])
+                                os.kill(pid, signal.SIGKILL)
+                                killed_pids.append(pid)
+                            except:
+                                pass
         except:
             pass
-            
+        
+        # 4. PM2 cleanup
+        subprocess.run(['pm2', 'flush'], timeout=1, capture_output=True)
+        
     except Exception as e:
-        print(f"Force kill error for form {form_number}: {e}")
+        print(f"Nuclear kill error {form_number}: {e}")
     
     return killed_pids
 
 @app.route('/start/<int:form_number>', methods=['POST'])
 def start_galaxy(form_number):
-    """Ultra-fast galaxy start with immediate response"""
+    """Instant start response"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
+        data = request.json or {}
+        write_config_instant(data, form_number)
         
-        # Write config asynchronously (non-blocking)
-        config = write_config_fast(data, form_number)
+        script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
+        if not os.path.exists(script_path):
+            return jsonify({"error": f"Script missing: galaxy_{form_number}.js"}), 404
         
-        galaxy_script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
-        
-        # Quick file existence check
-        if not os.path.exists(galaxy_script_path):
-            return jsonify({"error": f"Script not found: galaxy_{form_number}.js"}), 404
-        
-        def start_process():
+        def start_bg():
             try:
                 with process_lock:
-                    # Force stop existing process first
-                    if galaxy_processes[form_number]:
-                        force_kill_pm2_process(form_number)
+                    # Kill existing first
+                    nuclear_kill(form_number)
                     
-                    # Build command quickly
-                    cmd = ['pm2', 'start', galaxy_script_path, '--name', f'galaxy_{form_number}', '--']
+                    # Build command
+                    cmd = ['pm2', 'start', script_path, '--name', f'galaxy_{form_number}', '--']
                     
-                    # Add arguments efficiently
+                    # Add args efficiently
                     arg_map = {
-                        'RC1': 'RC1', 'RC2': 'RC2',
-                        'startAttackTime': 'startAttackTime', 'stopAttackTime': 'stopAttackTime',
-                        'attackIntervalTime': 'attackIntervalTime',
+                        'RC1': 'RC1', 'RC2': 'RC2', 'startAttackTime': 'startAttackTime',
+                        'stopAttackTime': 'stopAttackTime', 'attackIntervalTime': 'attackIntervalTime',
                         'startDefenceTime': 'startDefenceTime', 'stopDefenceTime': 'stopDefenceTime',
-                        'defenceIntervalTime': 'defenceIntervalTime',
-                        'PlanetName': 'planetName', 'Rival': 'rival',
-                        'standOnEnemy': 'standOnEnemy', 'actionOnEnemy': 'actionOnEnemy'
+                        'defenceIntervalTime': 'defenceIntervalTime', 'PlanetName': 'planetName',
+                        'Rival': 'rival', 'standOnEnemy': 'standOnEnemy', 'actionOnEnemy': 'actionOnEnemy'
                     }
                     
-                    for key, value in data.items():
+                    for key, val in data.items():
                         base_key = key.rstrip('12345')
                         if base_key in arg_map:
-                            cmd.extend([f'--{arg_map[base_key]}', str(value)])
+                            cmd.extend([f'--{arg_map[base_key]}', str(val)])
                     
-                    # Start process with timeout
-                    process = subprocess.Popen(
-                        cmd,
-                        cwd=GALAXY_BACKEND_PATH,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
-                    )
-                    
-                    galaxy_processes[form_number] = process
+                    # Start process
+                    proc = subprocess.Popen(cmd, cwd=GALAXY_BACKEND_PATH, 
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    galaxy_processes[form_number] = proc
                     
             except Exception as e:
-                print(f"Start process error for form {form_number}: {e}")
+                print(f"Start error {form_number}: {e}")
         
-        # Start process in background thread
-        executor.submit(start_process)
+        executor.submit(start_bg)
         
-        # Return immediate response
         return jsonify({
-            "message": f"Galaxy_{form_number} starting...",
-            "status": "initiated",
-            "form_number": form_number
+            "message": f"Galaxy_{form_number} launching...",
+            "status": "starting",
+            "form": form_number,
+            "timestamp": int(time.time())
         }), 200
         
     except Exception as e:
-        return jsonify({"error": f"Start failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/stop/<int:form_number>', methods=['POST'])
 def stop_galaxy(form_number):
-    """Ultra-fast forceful stop with immediate response"""
+    """Instant nuclear stop"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
-    def force_stop():
-        killed_pids = []
-        try:
-            with process_lock:
-                # Get current PID if available
-                current_pid = None
-                if galaxy_processes[form_number]:
-                    try:
-                        current_pid = galaxy_processes[form_number].pid
-                    except:
-                        pass
-                
-                # Force kill using multiple methods
-                killed_pids = force_kill_pm2_process(form_number)
-                
-                # Additional cleanup
-                try:
-                    subprocess.run(['pm2', 'flush'], timeout=1, capture_output=True)
-                    subprocess.run(['pm2', 'reload'], timeout=1, capture_output=True)
-                except:
-                    pass
-                
-                # Clear process reference
-                galaxy_processes[form_number] = None
-                
-                if current_pid and current_pid not in killed_pids:
-                    killed_pids.append(current_pid)
-                    
-        except Exception as e:
-            print(f"Force stop error for form {form_number}: {e}")
-        
-        return killed_pids
+    # Execute nuclear kill in background
+    executor.submit(lambda: nuclear_kill(form_number))
     
-    # Execute stop in background
-    executor.submit(force_stop)
+    # Clear process reference immediately
+    with process_lock:
+        galaxy_processes[form_number] = None
     
-    # Return immediate response
     return jsonify({
-        "message": f"Galaxy_{form_number} force stopping...",
-        "status": "terminating",
-        "form_number": form_number
+        "message": f"Galaxy_{form_number} terminated!",
+        "status": "killed",
+        "form": form_number,
+        "method": "nuclear",
+        "timestamp": int(time.time())
     }), 200
 
 @app.route('/update/<int:form_number>', methods=['POST'])
 def update_galaxy(form_number):
-    """Ultra-fast config update with immediate response"""
+    """Instant config update"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
+        data = request.json or {}
+        write_config_instant(data, form_number)
         
-        # Update config asynchronously
-        write_config_fast(data, form_number)
-        
-        # Return immediate response
         return jsonify({
-            "message": f"Galaxy_{form_number} config updating...",
+            "message": f"Galaxy_{form_number} config updated",
             "status": "updated",
-            "form_number": form_number
+            "form": form_number,
+            "timestamp": int(time.time())
         }), 200
         
     except Exception as e:
-        return jsonify({"error": f"Update failed: {str(e)}"}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/status', methods=['GET'])
 def get_status():
-    """Ultra-fast status check with caching"""
-    current_time = time.time()
+    """Smart cached status"""
+    now = time.time()
     
-    # Use cached status if recent (within 0.5 seconds)
-    if current_time - status_cache["last_update"] < 0.5:
+    # Return cached if recent (0.3 seconds)
+    if now - status_cache["time"] < 0.3:
         return jsonify(status_cache["data"]), 200
     
-    def get_real_status():
-        status = {}
+    def get_pm2_status():
         try:
-            # Quick PM2 list check
-            result = subprocess.run(
-                ['pm2', 'jlist'],
-                cwd=GALAXY_BACKEND_PATH,
-                capture_output=True,
-                text=True,
-                timeout=2
-            )
-            
-            pm2_processes = {}
+            result = subprocess.run(['pm2', 'jlist'], cwd=GALAXY_BACKEND_PATH,
+                                  capture_output=True, text=True, timeout=2)
             if result.returncode == 0:
-                try:
-                    pm2_data = json.loads(result.stdout)
-                    for proc in pm2_data:
-                        if proc.get('name', '').startswith('galaxy_'):
-                            form_num = int(proc['name'].split('_')[1])
-                            pm2_processes[form_num] = {
-                                'status': proc.get('pm2_env', {}).get('status', 'unknown'),
-                                'pid': proc.get('pid'),
-                                'cpu': proc.get('monit', {}).get('cpu', 0),
-                                'memory': proc.get('monit', {}).get('memory', 0)
-                            }
-                except:
-                    pass
-            
-            for form_number in range(1, 6):
-                pm2_info = pm2_processes.get(form_number, {})
-                is_running = pm2_info.get('status') == 'online'
-                
-                status[f"form_{form_number}"] = {
-                    "galaxy_running": is_running,
-                    "galaxy_pid": pm2_info.get('pid'),
-                    "status": pm2_info.get('status', 'stopped'),
-                    "cpu_usage": pm2_info.get('cpu', 0),
-                    "memory_usage": pm2_info.get('memory', 0)
-                }
-                
-        except Exception as e:
-            # Fallback status
-            for form_number in range(1, 6):
-                status[f"form_{form_number}"] = {
-                    "galaxy_running": False,
-                    "galaxy_pid": None,
-                    "status": "unknown",
-                    "cpu_usage": 0,
-                    "memory_usage": 0
-                }
-        
-        return status
+                return json.loads(result.stdout)
+        except:
+            pass
+        return []
     
-    # Get status (use cached or fresh)
-    status = get_real_status()
+    pm2_data = get_pm2_status()
+    pm2_map = {proc.get('name', '').replace('galaxy_', ''): proc 
+               for proc in pm2_data if proc.get('name', '').startswith('galaxy_')}
+    
+    status = {}
+    for form_num in range(1, 6):
+        proc_info = pm2_map.get(str(form_num), {})
+        is_online = proc_info.get('pm2_env', {}).get('status') == 'online'
+        
+        status[f"form_{form_num}"] = {
+            "running": is_online,
+            "pid": proc_info.get('pid'),
+            "status": proc_info.get('pm2_env', {}).get('status', 'stopped'),
+            "cpu": proc_info.get('monit', {}).get('cpu', 0),
+            "memory": proc_info.get('monit', {}).get('memory', 0)
+        }
     
     # Update cache
     status_cache["data"] = status
-    status_cache["last_update"] = current_time
+    status_cache["time"] = now
     
     return jsonify(status), 200
 
-@app.route('/quick-status', methods=['GET'])
+@app.route('/ping', methods=['GET'])
+def ping():
+    """Ultra-fast ping"""
+    return jsonify({"pong": int(time.time() * 1000)}), 200
+
+@app.route('/quick', methods=['GET'])
 def quick_status():
-    """Instant status without heavy operations"""
+    """Lightning-fast basic status"""
     status = {}
-    
     try:
         with process_lock:
-            for form_number in range(1, 6):
-                process = galaxy_processes[form_number]
-                is_alive = process is not None and process.poll() is None
-                
-                status[f"form_{form_number}"] = {
-                    "galaxy_running": is_alive,
-                    "galaxy_pid": process.pid if is_alive else None,
-                    "process_exists": process is not None
+            for form_num in range(1, 6):
+                proc = galaxy_processes[form_num]
+                alive = proc is not None and proc.poll() is None
+                status[f"form_{form_num}"] = {
+                    "alive": alive,
+                    "pid": proc.pid if alive else None
                 }
     except:
-        for form_number in range(1, 6):
-            status[f"form_{form_number}"] = {
-                "galaxy_running": False,
-                "galaxy_pid": None,
-                "process_exists": False
-            }
+        status = {f"form_{i}": {"alive": False, "pid": None} for i in range(1, 6)}
     
     return jsonify(status), 200
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Ultra-fast health check"""
-    return jsonify({
-        "status": "healthy",
-        "timestamp": time.time(),
-        "backend_path": GALAXY_BACKEND_PATH,
-        "threads_active": executor._threads.__len__() if hasattr(executor, '_threads') else 0
-    }), 200
-
-def cleanup_all():
-    """Fast cleanup on shutdown"""
-    print("Performing fast cleanup...")
-    
-    # Stop all processes quickly
-    cleanup_futures = []
-    for form_number in range(1, 6):
-        future = executor.submit(force_kill_pm2_process, form_number)
-        cleanup_futures.append(future)
-    
-    # Wait for cleanup with timeout
-    for future in cleanup_futures:
+def cleanup_on_exit():
+    """Fast exit cleanup"""
+    print("🧹 Fast cleanup...")
+    futures = [executor.submit(nuclear_kill, i) for i in range(1, 6)]
+    for f in futures:
         try:
-            future.result(timeout=2)
+            f.result(timeout=1)
         except:
             pass
-    
-    # Shutdown executor
     executor.shutdown(wait=False)
-    print("Cleanup completed")
-
-def signal_handler(sig, frame):
-    cleanup_all()
-    exit(0)
 
 if __name__ == '__main__':
-    # Register signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, lambda s, f: (cleanup_on_exit(), exit(0)))
+    signal.signal(signal.SIGTERM, lambda s, f: (cleanup_on_exit(), exit(0)))
     
-    # Validate environment
     if not os.path.exists(GALAXY_BACKEND_PATH):
-        print(f"ERROR: Galaxy backend directory not found at {GALAXY_BACKEND_PATH}")
+        print(f"❌ Backend path not found: {GALAXY_BACKEND_PATH}")
         exit(1)
     
-    # Quick validation of galaxy scripts
-    missing_scripts = []
-    for form_number in range(1, 6):
-        script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
-        if not os.path.exists(script_path):
-            missing_scripts.append(f'galaxy_{form_number}.js')
+    print("🚀 ULTRA-FAST Galaxy API")
+    print(f"📁 Path: {GALAXY_BACKEND_PATH}")
+    print("⚡ Zero-delay responses enabled!")
     
-    if missing_scripts:
-        print(f"WARNING: Missing scripts: {', '.join(missing_scripts)}")
-    
-    print("🚀 High-Performance Galaxy API starting...")
-    print(f"📁 Backend Path: {GALAXY_BACKEND_PATH}")
-    print(f"🧵 Thread Pool Size: {MAX_WORKERS}")
-    print(f"⚡ Optimized for maximum speed!")
-    
-    # Start Flask with optimized settings
-    app.run(
-        host='0.0.0.0',
-        port=7860,
-        debug=False,
-        threaded=True,
-        processes=1
-    )
+    app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
