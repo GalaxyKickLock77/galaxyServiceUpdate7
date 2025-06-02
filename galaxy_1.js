@@ -74,12 +74,21 @@ function getNextRC() {
     return lastUsedRC;
 }
 
-function initializeTimingStates() {
-    attackTimingState.currentTime = config.startAttackTime;
-    defenseTimingState.currentTime = config.startDefenceTime;
-    console.log("Timing states initialized:", {
-        attack: attackTimingState.currentTime,
-        defense: defenseTimingState.currentTime
+function initializeTimingStates(connection) {
+    const rcKey = connection.rcKey;
+    connection.attackTimingState = {
+        currentTime: config[`${rcKey}_startAttackTime`],
+        lastMode: null,
+        consecutiveErrors: 0
+    };
+    connection.defenseTimingState = {
+        currentTime: config[`${rcKey}_startDefenceTime`],
+        lastMode: null,
+        consecutiveErrors: 0
+    };
+    console.log(`Timing states initialized for ${connection.botId || 'new connection'} (${rcKey}):`, {
+        attack: connection.attackTimingState.currentTime,
+        defense: connection.defenseTimingState.currentTime
     });
 }
 
@@ -97,25 +106,13 @@ function updateConfigValues() {
         if (typeof config.actionOnEnemy === 'undefined') {
             throw new Error("Config must contain actionOnEnemy");
         }
-        initializeTimingStates();
-        console.log("Configuration updated:", { 
-            rivalNames, 
+        // Timing states will now be initialized per connection
+        console.log("Configuration updated. Timing states will be initialized per connection.");
+        console.log("Configuration updated:", {
+            rivalNames,
             standOnEnemy: config.standOnEnemy,
-            actionOnEnemy: config.actionOnEnemy,
-            attackSettings: { 
-                start: config.startAttackTime, 
-                stop: config.stopAttackTime, 
-                interval: config.attackIntervalTime, 
-                current: attackTimingState.currentTime 
-            },
-            defenseSettings: { 
-                start: config.startDefenceTime, 
-                stop: config.stopDefenceTime, 
-                interval: config.defenceIntervalTime, 
-                current: defenseTimingState.currentTime 
-            }
+            actionOnEnemy: config.actionOnEnemy
         });
-        debugTimingStates();
     } catch (error) {
         console.error("Error updating config:", error);
     }
@@ -136,12 +133,13 @@ function genHash(code) {
     return str;
 }
 
-function incrementTiming(mode, errorType = 'success') {
+function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
-    const timingState = isAttack ? attackTimingState : defenseTimingState;
-    const configStart = isAttack ? config.startAttackTime : config.startDefenceTime;
-    const configStop = isAttack ? config.stopAttackTime : config.stopDefenceTime;
-    const configInterval = isAttack ? config.attackIntervalTime : config.defenceIntervalTime;
+    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
+    const rcKey = connection.rcKey;
+    const configStart = isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`];
+    const configStop = isAttack ? config[`${rcKey}_stopAttackTime`] : config[`${rcKey}_stopDefenceTime`];
+    const configInterval = isAttack ? config[`${rcKey}_attackIntervalTime`] : config[`${rcKey}_defenceIntervalTime`];
     
     if (errorType !== 'success') {
         timingState.consecutiveErrors++;
@@ -155,19 +153,20 @@ function incrementTiming(mode, errorType = 'success') {
     if (timingState.currentTime > configStop) {
         timingState.currentTime = configStart;
         timingState.consecutiveErrors = 0;
-        console.log(`${mode} timing cycled back to start: ${timingState.currentTime}ms`);
+        console.log(`${mode} timing for ${connection.botId} (${rcKey}) cycled back to start: ${timingState.currentTime}ms`);
     } else {
-        console.log(`${mode} timing incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
+        console.log(`${mode} timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
     }
     
     timingState.lastMode = mode;
     return timingState.currentTime;
 }
 
-function getCurrentTiming(mode) {
+function getCurrentTiming(mode, connection) {
     const isAttack = mode === 'attack';
-    const timingState = isAttack ? attackTimingState : defenseTimingState;
-    return timingState.currentTime || (isAttack ? config.startAttackTime : config.startDefenceTime);
+    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
+    const rcKey = connection.rcKey;
+    return timingState.currentTime || (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
 }
 
 async function optimizedConnectionPoolMaintenance() {
@@ -368,7 +367,7 @@ async function getPrisonConnection() {
 async function getConnection(activateFromPool = true) {
     const now = Date.now();
     if (now - lastCloseTime < 500) {
-        const waitTime = 500 - (now - lastCloseTime);
+        const waitTime = 1000 - (now - lastCloseTime);
         console.log(`Waiting ${waitTime}ms before attempting to get new connection`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
@@ -492,6 +491,8 @@ function createConnection() {
         cleanupResolve: null,
         cleanupPromise: null,
         lastActionCommand: null, // Track last action command
+        attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
+        defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -527,6 +528,7 @@ function createConnection() {
                         this.state = CONNECTION_STATES.CONNECTED;
                         console.log("WebSocket connected, initializing identity");
                         this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                        initializeTimingStates(this); // Initialize timing states for this connection
                     });
                     
                     this.socket.on('message', (data) => {
@@ -819,7 +821,7 @@ function createConnection() {
                         if (payload.includes("3 секунд(ы)")) {
                             console.log(`850 error detected in mode: ${currentMode}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, '3second');
+                                const newTiming = incrementTiming(currentMode, this, '3second');
                                 console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
                             } else {
                                 console.log(`850 error but no active mode, current mode: ${currentMode}`);
@@ -827,7 +829,7 @@ function createConnection() {
                         } else {
                             console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, 'general_error');
+                                const newTiming = incrementTiming(currentMode, this, 'general_error');
                                 console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
                             }
                         }
@@ -878,7 +880,7 @@ function createConnection() {
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
                     }, 1000);
-
+    
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
                         this.botId = parts[1];
@@ -886,7 +888,7 @@ function createConnection() {
                         this.nick = parts[3];
                         if (this.hash) {
                             let authenticationComplete = false;
-
+    
                             let authHandler = (event) => {
                                 const message = event.data.toString().trim();
                                 if (message.startsWith("999") && !authenticationComplete) {
@@ -908,10 +910,11 @@ function createConnection() {
                                     if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
                                     console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
                                     
+                                    initializeTimingStates(this); // Initialize timing states for this connection
                                     resolve(this);
                                 }
                             };
-
+    
                             this.socket.addEventListener('message', authHandler);
                             
                             this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
@@ -961,7 +964,7 @@ function createConnection() {
         }
     };
     return conn;
-}
+    }
 
 function parse353(message, connection) {
     if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
@@ -1204,9 +1207,9 @@ async function handleRivals(rivals, mode, connection) {
     }
     
     currentMode = mode;
-    const waitTime = getCurrentTiming(mode);
+    const waitTime = getCurrentTiming(mode, connection);
     console.log(`Handling rivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
-    console.log(`Timing state - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
+    console.log(`Timing state for ${connection.botId} - Attack: ${connection.attackTimingState.currentTime}ms (errors: ${connection.attackTimingState.consecutiveErrors}), Defense: ${connection.defenseTimingState.currentTime}ms (errors: ${connection.defenseTimingState.consecutiveErrors})`);
     
     monitoringMode = false;
     
@@ -1242,8 +1245,8 @@ async function handleRivals(rivals, mode, connection) {
     
     await Promise.all(actionPromises);
     
-    const newTiming = incrementTiming(mode, 'success');
-    console.log(`✅ ${mode} timing incremented after actions: ${newTiming}ms`);
+    const newTiming = incrementTiming(mode, connection, 'success');
+    console.log(`✅ ${mode} timing for ${connection.botId} incremented after actions: ${newTiming}ms`);
     
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
     await connection.cleanup(true);
@@ -1253,6 +1256,7 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
         console.time('reconnectAfterAction');
+        await new Promise(resolve => setTimeout(resolve, 250)); 
         await getConnection(true);
         console.timeEnd('reconnectAfterAction');
     } catch (error) {
@@ -1310,9 +1314,7 @@ setInterval(() => {
     console.log(`📊 Optimized Pool Status - Regular: ${healthyRegular}/${connectionPool.length} (target: ${POOL_TARGET_SIZE}), Prison: ${healthyPrison}/${prisonConnectionPool.length} (target: ${PRISON_POOL_TARGET_SIZE})`);
 }, 30000);
 
-setInterval(() => {
-    console.log(`📊 Timing States - Attack: ${attackTimingState.currentTime}ms (errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (errors: ${defenseTimingState.consecutiveErrors})`);
-}, 60000);
+// Removed global timing state logging as it's now per-connection
 
 async function recoverUser() {
     console.log("Starting recovery with alternating RCs");
@@ -1373,6 +1375,4 @@ process.on('unhandledRejection', async (reason, promise) => {
     }, 500);
 });
 
-function debugTimingStates() {
-    console.log(`Debug Timing States - Attack: ${attackTimingState.currentTime}ms (lastMode: ${attackTimingState.lastMode}, errors: ${attackTimingState.consecutiveErrors}), Defense: ${defenseTimingState.currentTime}ms (lastMode: ${defenseTimingState.lastMode}, errors: ${defenseTimingState.consecutiveErrors})`);
-}
+// Removed global debugTimingStates as it's now per-connection
