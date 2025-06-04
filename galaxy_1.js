@@ -635,8 +635,13 @@ function createConnection() {
                                     const messageContentStartIndex = message.indexOf(':', message.indexOf(senderId)) + 1;
                                     const fullMessageContent = message.substring(messageContentStartIndex).trim();
                                     
-                                    // Use the full message content directly as the question
-                                    const question = fullMessageContent;
+                                    let question = fullMessageContent;
+                                    // Check if the message starts with the specific username format and remove it
+                                    const usernamePrefix = '`[R]OLE[X]`, ';
+                                    if (question.startsWith(usernamePrefix)) {
+                                        question = question.substring(usernamePrefix.length).trim();
+                                        console.log(`AI Chat: Removed username prefix, question is now: "${question}"`);
+                                    }
                                     console.log(`AI Chat: Received question: "${question}"`);
 
                                     if (question) {
