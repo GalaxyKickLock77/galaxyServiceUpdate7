@@ -16,5 +16,6 @@
   "planetName": "THE_BOT",
   "rival": [""],
   "standOnEnemy": "false",
-  "actionOnEnemy": "false"
+  "actionOnEnemy": "false",
+  "aiChat": false
 }

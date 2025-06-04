@@ -5,6 +5,7 @@ const CryptoJS = require('crypto-js');
 const path = require('path');
 const https = require('https');
 const { URL } = require('url');
+const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
 // Optimized Connection Pool Settings
 const POOL_MIN_SIZE = 1;
@@ -612,6 +613,54 @@ function createConnection() {
                 }
                 
                 switch (command) {
+                    case "PRIVMSG":
+                        if (config.aiChat) {
+                            // Example message: :<sender_nick> PRIVMSG <target_id> <flag> <sender_id> :<message_content>
+                            // Or: PRIVMSG <target_id> <flag> <sender_id> :<message_content>
+                            // Based on user's example: PRIVMSG 14358744 1 54531773 :`[R]OLE[X]`, hi
+                            
+                            // parts[0] = PRIVMSG
+                            // parts[1] = targetId (our bot's ID)
+                            // parts[2] = flag (e.g., 1)
+                            // parts[3] = senderId (user's ID)
+                            // parts[4] = :`[R]OLE[X]`, hi (start of message content, including the leading colon)
+
+                            if (parts.length >= 5) {
+                                const targetId = parts[3]; // Our bot's ID
+                                const senderId = parts[1]; // The user ID who sent the message
+                                
+                                // Only process if the message is for our bot and not from our bot itself
+                                if (targetId === this.botId && senderId !== this.botId) {
+                                    // Reconstruct the full message content starting from the colon after senderId
+                                    const messageContentStartIndex = message.indexOf(':', message.indexOf(senderId)) + 1;
+                                    const fullMessageContent = message.substring(messageContentStartIndex).trim();
+                                    
+                                    let question = fullMessageContent;
+                                    // Check if the message starts with the specific username format and remove it
+                                    const usernamePrefix = '`[R]OLE[X]`, ';
+                                    if (question.startsWith(usernamePrefix)) {
+                                        question = question.substring(usernamePrefix.length).trim();
+                                        console.log(`AI Chat: Removed username prefix, question is now: "${question}"`);
+                                    }
+                                    console.log(`AI Chat: Received question: "${question}"`);
+
+                                    if (question) {
+                                        getMistralChatResponse(question)
+                                            .then(aiResponse => {
+                                                const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
+                                               setTimeout(() => {
+                                                   this.send(responseMessage);
+                                               }, 200); // 200ms delay for AI chat response
+                                                console.log(`AI Chat: Sent response: "${aiResponse}"`);
+                                            })
+                                            .catch(error => {
+                                                console.error(`AI Chat Error: ${error.message}`);
+                                            });
+                                    }
+                                }
+                            }
+                        }
+                        break;
                     case "PING":
                         this.send("PONG");
                         break;
@@ -1375,4 +1424,54 @@ process.on('unhandledRejection', async (reason, promise) => {
     }, 500);
 });
 
+async function getMistralChatResponse(prompt) {
+    const url = 'https://api.mistral.ai/v1/chat/completions';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${MISTRAL_API_KEY}`
+    };
+    const data = JSON.stringify({
+        "model": "open-mistral-7b",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 20,
+        "temperature": 0.2,
+        "top_p": 1,
+        "random_seed": 42,
+        "stream": false
+    });
+
+    return new Promise((resolve, reject) => {
+        const req = https.request(url, {
+            method: 'POST',
+            headers: headers
+        }, (res) => {
+            let responseBody = '';
+            res.on('data', (chunk) => {
+                responseBody += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    const jsonResponse = JSON.parse(responseBody);
+                    if (jsonResponse.choices && jsonResponse.choices.length > 0) {
+                        resolve(jsonResponse.choices[0].message.content);
+                    } else {
+                        reject(new Error('No response from Mistral AI'));
+                    }
+                } catch (e) {
+                    reject(new Error(`Failed to parse Mistral AI response: ${e.message}`));
+                }
+            });
+        });
+
+        req.on('error', (e) => {
+            reject(new Error(`Mistral AI request failed: ${e.message}`));
+        });
+
+        req.write(data);
+        req.end();
+    });
+}
 // Removed global debugTimingStates as it's now per-connection
