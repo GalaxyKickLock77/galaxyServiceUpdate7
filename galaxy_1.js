@@ -642,10 +642,6 @@ function createConnection() {
                                     if (usernameMatch) {
                                         question = (usernameMatch[1] || '').trim();
                                         console.log(`AI Chat: Received question from user: "${question}"`);
-                                    } else {
-                                        // If no specific username format, assume the whole content is the question
-                                        question = fullMessageContent.trim();
-                                        console.log(`AI Chat: Received question (no specific username format detected): "${question}"`);
                                     }
 
                                     if (question) {
@@ -1440,7 +1436,7 @@ async function getMistralChatResponse(prompt) {
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 40,
+        "max_tokens": 30,
         "temperature": 0.2,
         "top_p": 1,
         "random_seed": 42,
