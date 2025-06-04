@@ -642,6 +642,10 @@ function createConnection() {
                                     if (usernameMatch) {
                                         question = (usernameMatch[1] || '').trim();
                                         console.log(`AI Chat: Received question from user: "${question}"`);
+                                    } else {
+                                        // If no specific username format, assume the whole content is the question
+                                        question = fullMessageContent.trim();
+                                        console.log(`AI Chat: Received question (no specific username format detected): "${question}"`);
                                     }
 
                                     if (question) {
