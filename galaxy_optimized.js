@@ -484,9 +484,11 @@ function createConnection() {
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-                this.socket.send(str + "\r\n");
-                console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
-                this.lastUsed = Date.now();
+                setTimeout(() => {
+                    this.socket.send(str + "\r\n");
+                    console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
+                    this.lastUsed = Date.now();
+                }, 500);
                 return true;
             } else {
                 console.log(`Cannot send [${this.botId || 'connecting'}]: Socket not open (state: ${this.state})`);

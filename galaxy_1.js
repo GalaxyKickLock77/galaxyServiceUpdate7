@@ -497,12 +497,9 @@ function createConnection() {
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-                // Introduce a delay before sending messages to prevent flooding
-                setTimeout(() => {
-                    this.socket.send(str + "\r\n");
-                    console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
-                    this.lastUsed = Date.now();
-                }, 500); // 500ms delay
+                this.socket.send(str + "\r\n");
+                console.log(`Sent [${this.botId || 'connecting'}]: ${str}`);
+                this.lastUsed = Date.now();
                 return true;
             } else {
                 console.log(`Cannot send [${this.botId || 'connecting'}]: Socket not open (state: ${this.state})`);
@@ -1443,7 +1440,7 @@ async function getMistralChatResponse(prompt) {
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 50,
+        "max_tokens": 75,
         "temperature": 0.7,
         "top_p": 1,
         "random_seed": 42,
