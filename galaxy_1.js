@@ -1438,7 +1438,7 @@ async function getMistralChatResponse(prompt) {
         'Authorization': `Bearer ${MISTRAL_API_KEY}`
     };
     const data = JSON.stringify({
-        "model": "devstral:latest",
+        "model": "mistral-large-latest",
         "messages": [
             {"role": "user", "content": prompt}
         ],
