@@ -637,17 +637,11 @@ function createConnection() {
                                     
                                     let question = '';
                                     // Regex to match `USERNAME`, or [USERNAME], or just USERNAME, followed by the question
-                                    const usernameMatch = fullMessageContent.match(/^(?:`\[?([^`\]]+?)\]?`|\[([^\]]+?)\]|([^,`\[\]]+?)),?\s*(.*)/);
+                                    const usernameMatch = fullMessageContent.match(/^[^,`\[\]]+(?:,?\s+)?(.*)/);
                                     
                                     if (usernameMatch) {
-                                        // usernameMatch[1] for ``USERNAME``, usernameMatch[2] for [USERNAME], usernameMatch[3] for USERNAME
-                                        // usernameMatch[4] for the actual question
-                                        question = (usernameMatch[4] || '').trim();
+                                        question = (usernameMatch[1] || '').trim();
                                         console.log(`AI Chat: Received question from user: "${question}"`);
-                                    } else {
-                                        // If no specific username format, assume the whole content is the question
-                                        question = fullMessageContent.trim();
-                                        console.log(`AI Chat: Received question (no specific username format detected): "${question}"`);
                                     }
 
                                     if (question) {
