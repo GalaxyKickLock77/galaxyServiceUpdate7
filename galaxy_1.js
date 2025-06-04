@@ -657,6 +657,20 @@ function createConnection() {
                                                 console.error(`AI Chat Error: ${error.message}`);
                                             });
                                     }
+
+                                    if (question) {
+                                        getMistralChatResponse(question)
+                                            .then(aiResponse => {
+                                                const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
+                                               setTimeout(() => {
+                                                   this.send(responseMessage);
+                                               }, 200); // 200ms delay for AI chat response
+                                                console.log(`AI Chat: Sent response: "${aiResponse}"`);
+                                            })
+                                            .catch(error => {
+                                                console.error(`AI Chat Error: ${error.message}`);
+                                            });
+                                    }
                                 }
                             }
                         }
@@ -1436,7 +1450,7 @@ async function getMistralChatResponse(prompt) {
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 30,
+        "max_tokens": 40,
         "temperature": 0.2,
         "top_p": 1,
         "random_seed": 42,
