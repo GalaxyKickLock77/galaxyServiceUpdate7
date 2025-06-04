@@ -635,18 +635,9 @@ function createConnection() {
                                     const messageContentStartIndex = message.indexOf(':', message.indexOf(senderId)) + 1;
                                     const fullMessageContent = message.substring(messageContentStartIndex).trim();
                                     
-                                    let question = '';
-                                    // Regex to match `USERNAME`, or [USERNAME], or just USERNAME, followed by the question
-                                    const usernameMatch = fullMessageContent.match(/^[^,`\[\]]+(?:,?\s+)?(.*)/);
-                                    
-                                    if (usernameMatch) {
-                                        question = (usernameMatch[1] || '').trim();
-                                        console.log(`AI Chat: Received question from user: "${question}"`);
-                                    } else {
-                                        // If no specific username format, assume the whole content is the question
-                                        question = fullMessageContent.trim();
-                                        console.log(`AI Chat: Received question (no specific username format detected): "${question}"`);
-                                    }
+                                    // Use the full message content directly as the question
+                                    const question = fullMessageContent;
+                                    console.log(`AI Chat: Received question: "${question}"`);
 
                                     if (question) {
                                         getMistralChatResponse(question)
