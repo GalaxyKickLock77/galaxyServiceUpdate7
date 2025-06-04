@@ -654,7 +654,9 @@ function createConnection() {
                                         getMistralChatResponse(question)
                                             .then(aiResponse => {
                                                 const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
-                                                this.send(responseMessage);
+                                               setTimeout(() => {
+                                                   this.send(responseMessage);
+                                               }, 200); // 200ms delay for AI chat response
                                                 console.log(`AI Chat: Sent response: "${aiResponse}"`);
                                             })
                                             .catch(error => {
@@ -1440,7 +1442,7 @@ async function getMistralChatResponse(prompt) {
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 75,
+        "max_tokens": 50,
         "temperature": 0.7,
         "top_p": 1,
         "random_seed": 42,
