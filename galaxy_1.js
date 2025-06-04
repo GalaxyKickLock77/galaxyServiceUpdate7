@@ -5,6 +5,7 @@ const CryptoJS = require('crypto-js');
 const path = require('path');
 const https = require('https');
 const { URL } = require('url');
+const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
 // Optimized Connection Pool Settings
 const POOL_MIN_SIZE = 1;
@@ -612,6 +613,42 @@ function createConnection() {
                 }
                 
                 switch (command) {
+                    case "PRIVMSG":
+                        if (config.aiChat) {
+                            const privmsgParts = message.split(' ');
+                            if (privmsgParts.length >= 5 && privmsgParts[0].startsWith(':') && privmsgParts[3] === ':') {
+                                const senderId = privmsgParts[1];
+                                const botId = this.botId;
+                                const loggedInUsername = this.nick;
+                                
+                                if (senderId !== botId) { // Ensure the message is not from the bot itself
+                                    const fullMessage = message.substring(message.indexOf(':', 3) + 1); // Get content after the third colon
+                                    const usernameMatch = fullMessage.match(/^``(.*?)``,?\s*(.*)/);
+                                    let question = '';
+                                    if (usernameMatch) {
+                                        const username = usernameMatch[1];
+                                        question = usernameMatch[2].trim();
+                                        console.log(`AI Chat: Received question from ${username}: "${question}"`);
+                                    } else {
+                                        question = fullMessage.trim();
+                                        console.log(`AI Chat: Received question (no username detected): "${question}"`);
+                                    }
+
+                                    if (question) {
+                                        getMistralChatResponse(question)
+                                            .then(aiResponse => {
+                                                const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
+                                                this.send(responseMessage);
+                                                console.log(`AI Chat: Sent response: "${aiResponse}"`);
+                                            })
+                                            .catch(error => {
+                                                console.error(`AI Chat Error: ${error.message}`);
+                                            });
+                                    }
+                                }
+                            }
+                        }
+                        break;
                     case "PING":
                         this.send("PONG");
                         break;
@@ -1375,4 +1412,54 @@ process.on('unhandledRejection', async (reason, promise) => {
     }, 500);
 });
 
+async function getMistralChatResponse(prompt) {
+    const url = 'https://api.mistral.ai/v1/chat/completions';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${MISTRAL_API_KEY}`
+    };
+    const data = JSON.stringify({
+        "model": "mistral-tiny",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 125,
+        "temperature": 0.7,
+        "top_p": 1,
+        "random_seed": 42,
+        "stream": false
+    });
+
+    return new Promise((resolve, reject) => {
+        const req = https.request(url, {
+            method: 'POST',
+            headers: headers
+        }, (res) => {
+            let responseBody = '';
+            res.on('data', (chunk) => {
+                responseBody += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    const jsonResponse = JSON.parse(responseBody);
+                    if (jsonResponse.choices && jsonResponse.choices.length > 0) {
+                        resolve(jsonResponse.choices[0].message.content);
+                    } else {
+                        reject(new Error('No response from Mistral AI'));
+                    }
+                } catch (e) {
+                    reject(new Error(`Failed to parse Mistral AI response: ${e.message}`));
+                }
+            });
+        });
+
+        req.on('error', (e) => {
+            reject(new Error(`Mistral AI request failed: ${e.message}`));
+        });
+
+        req.write(data);
+        req.end();
+    });
+}
 // Removed global debugTimingStates as it's now per-connection
