@@ -626,8 +626,8 @@ function createConnection() {
                             // parts[4] = :`[R]OLE[X]`, hi (start of message content, including the leading colon)
 
                             if (parts.length >= 5) {
-                                const targetId = parts[1]; // Our bot's ID
-                                const senderId = parts[3]; // The user ID who sent the message
+                                const targetId = parts[3]; // Our bot's ID
+                                const senderId = parts[1]; // The user ID who sent the message
                                 
                                 // Only process if the message is for our bot and not from our bot itself
                                 if (targetId === this.botId && senderId !== this.botId) {
