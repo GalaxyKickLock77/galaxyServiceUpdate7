@@ -642,20 +642,10 @@ function createConnection() {
                                     if (usernameMatch) {
                                         question = (usernameMatch[1] || '').trim();
                                         console.log(`AI Chat: Received question from user: "${question}"`);
-                                    }
-
-                                    if (question) {
-                                        getMistralChatResponse(question)
-                                            .then(aiResponse => {
-                                                const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
-                                               setTimeout(() => {
-                                                   this.send(responseMessage);
-                                               }, 200); // 200ms delay for AI chat response
-                                                console.log(`AI Chat: Sent response: "${aiResponse}"`);
-                                            })
-                                            .catch(error => {
-                                                console.error(`AI Chat Error: ${error.message}`);
-                                            });
+                                    } else {
+                                        // If no specific username format, assume the whole content is the question
+                                        question = fullMessageContent.trim();
+                                        console.log(`AI Chat: Received question (no specific username format detected): "${question}"`);
                                     }
 
                                     if (question) {
