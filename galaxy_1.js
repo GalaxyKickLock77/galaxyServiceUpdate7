@@ -1440,7 +1440,7 @@ async function getMistralChatResponse(prompt) {
         "messages": [
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 10,
+        "max_tokens": 20,
         "temperature": 0.2,
         "top_p": 1,
         "random_seed": 42,
