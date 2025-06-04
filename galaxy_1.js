@@ -615,23 +615,30 @@ function createConnection() {
                 switch (command) {
                     case "PRIVMSG":
                         if (config.aiChat) {
-                            const privmsgParts = message.split(' ');
-                            if (privmsgParts.length >= 5 && privmsgParts[0].startsWith(':') && privmsgParts[3] === ':') {
-                                const senderId = privmsgParts[1];
-                                const botId = this.botId;
-                                const loggedInUsername = this.nick;
+                            // Find the index of the second colon to correctly extract the message payload
+                            const firstColonIndex = message.indexOf(':');
+                            const secondColonIndex = message.indexOf(':', firstColonIndex + 1);
+
+                            // Ensure it's a valid PRIVMSG format with at least two colons and enough parts
+                            if (secondColonIndex !== -1 && parts.length >= 5) {
+                                const senderId = parts[4]; // The user ID who sent the message
+                                const targetId = parts[2]; // The ID of the recipient (our bot's ID)
                                 
-                                if (senderId !== botId) { // Ensure the message is not from the bot itself
-                                    const fullMessage = message.substring(message.indexOf(':', 3) + 1); // Get content after the third colon
-                                    const usernameMatch = fullMessage.match(/^``(.*?)``,?\s*(.*)/);
+                                // Only process if the message is for our bot and not from our bot
+                                if (targetId === this.botId && senderId !== this.botId) {
+                                    const fullMessageContent = message.substring(secondColonIndex + 1).trim();
+                                    
                                     let question = '';
+                                    // Check for the "``USERNAME``, " format
+                                    const usernameMatch = fullMessageContent.match(/^``(.*?)``,?\s*(.*)/);
                                     if (usernameMatch) {
                                         const username = usernameMatch[1];
                                         question = usernameMatch[2].trim();
                                         console.log(`AI Chat: Received question from ${username}: "${question}"`);
                                     } else {
-                                        question = fullMessage.trim();
-                                        console.log(`AI Chat: Received question (no username detected): "${question}"`);
+                                        // If no "``USERNAME``" format, assume the whole content is the question
+                                        question = fullMessageContent.trim();
+                                        console.log(`AI Chat: Received question (no ``username`` detected): "${question}"`);
                                     }
 
                                     if (question) {
