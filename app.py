@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask_cors import CORS
 import signal
 import time
-import fcntl  # For file locking
 
 app = Flask(__name__)
 CORS(app)
@@ -26,15 +25,12 @@ process_lock = threading.RLock()
 config_cache = {}
 status_cache = {"time": 0, "data": {}}
 
-# File locks for each config file
-config_file_locks = {i: threading.Lock() for i in range(1, 6)}
-
 def string_to_bool(value):
     """Lightning-fast boolean conversion"""
     return isinstance(value, str) and value.lower().strip() in ('true', '1', 'yes', 'on') if isinstance(value, str) else bool(value)
 
 def write_config_instant(data, form_number):
-    """SYNCHRONOUS config writing with file locking for instant updates"""
+    """Instant config writing with background I/O"""
     config = {
         "RC1": data[f'RC1{form_number}'],
         "RC2": data[f'RC2{form_number}'],
@@ -57,50 +53,18 @@ def write_config_instant(data, form_number):
         "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}'])
     }
     
-    # Update cache first
     config_cache[form_number] = config
     
-    # SYNCHRONOUS file write with atomic operation and file locking
-    with config_file_locks[form_number]:  # Thread-level lock
-        config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
-        temp_path = config_path + '.tmp'
-        
+    # Async file write
+    def write_bg():
         try:
-            # Write to temporary file first (atomic operation)
-            with open(temp_path, 'w') as f:
-                # Apply file-level lock to prevent race conditions
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
+            with open(config_path, 'w') as f:
                 json.dump(config, f, separators=(',', ':'))
-                f.flush()  # Force write to disk
-                os.fsync(f.fileno())  # Force OS to write to disk
-            
-            # Atomic rename (this is instant on most filesystems)
-            os.rename(temp_path, config_path)
-            
         except Exception as e:
-            # Clean up temp file if something went wrong
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
-            raise e
+            print(f"Config write error {form_number}: {e}")
     
-    return config
-
-def write_config_with_signal(data, form_number):
-    """Write config and send signal to PM2 process for immediate reload"""
-    config = write_config_instant(data, form_number)
-    
-    # Send SIGUSR1 signal to PM2 process to trigger config reload
-    try:
-        result = subprocess.run(['pm2', 'sendSignal', 'SIGUSR1', f'galaxy_{form_number}'], 
-                              cwd=GALAXY_BACKEND_PATH, timeout=1, capture_output=True)
-        if result.returncode == 0:
-            print(f"✅ Sent reload signal to galaxy_{form_number}")
-    except Exception as e:
-        print(f"⚠️ Signal send failed for galaxy_{form_number}: {e}")
-    
+    executor.submit(write_bg)
     return config
 
 def nuclear_kill(form_number):
@@ -160,7 +124,7 @@ def start_galaxy(form_number):
     
     try:
         data = request.json or {}
-        write_config_instant(data, form_number)  # Synchronous write before starting
+        write_config_instant(data, form_number)
         
         script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
         if not os.path.exists(script_path):
@@ -233,21 +197,18 @@ def stop_galaxy(form_number):
 
 @app.route('/update/<int:form_number>', methods=['POST'])
 def update_galaxy(form_number):
-    """INSTANT synchronous config update with process signal"""
+    """Instant config update"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
         data = request.json or {}
-        
-        # SYNCHRONOUS config write - blocks until file is written to disk
-        config = write_config_with_signal(data, form_number)
+        write_config_instant(data, form_number)
         
         return jsonify({
-            "message": f"Galaxy_{form_number} config updated instantly",
+            "message": f"Galaxy_{form_number} config updated",
             "status": "updated",
             "form": form_number,
-            "config": config,  # Return the actual config for verification
             "timestamp": int(time.time())
         }), 200
         
@@ -340,6 +301,6 @@ if __name__ == '__main__':
     
     print("🚀 ULTRA-FAST Galaxy API")
     print(f"📁 Path: {GALAXY_BACKEND_PATH}")
-    print("⚡ INSTANT config updates enabled!")
+    print("⚡ Zero-delay responses enabled!")
     
     app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)

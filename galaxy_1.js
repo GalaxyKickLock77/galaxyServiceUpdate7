@@ -51,8 +51,7 @@ let defenseTimingState = {
     lastMode: null,
     consecutiveErrors: 0
 };
-let updateTimeout = null;
-let isUpdating = false;
+
 // Connection states
 const CONNECTION_STATES = {
     CLOSED: 'closed',
@@ -93,121 +92,40 @@ function initializeTimingStates(connection) {
         defense: connection.defenseTimingState.currentTime
     });
 }
-// Debounced update function to prevent rapid successive calls
-function debouncedUpdate() {
-    if (updateTimeout) {
-        clearTimeout(updateTimeout);
-    }
-    
-    updateTimeout = setTimeout(() => {
-        console.log('📁 Config file changed, updating values...');
-        updateConfigValues();
-    }, 50); // 50ms debounce
-}
 
 function updateConfigValues() {
-    // Prevent concurrent updates
-    if (isUpdating) {
-        return;
-    }
-    
-    isUpdating = true;
-    
     try {
-        // Force cache clear and immediate reload
         delete require.cache[require.resolve('./config1.json')];
-        
-        // Read file synchronously with retry logic for file locking
-        let attempts = 0;
-        const maxAttempts = 3;
-        let config;
-        
-        while (attempts < maxAttempts) {
-            try {
-                // Force fresh read from disk
-                const configData = fs.readFileSync('./config1.json', 'utf8');
-                config = JSON.parse(configData);
-                break;
-            } catch (error) {
-                if ((error.code === 'EBUSY' || error.code === 'ENOENT') && attempts < maxAttempts - 1) {
-                    // File is locked or temporarily unavailable, wait and retry
-                    attempts++;
-                    const delay = Math.pow(2, attempts) * 10; // Exponential backoff: 20ms, 40ms, 80ms
-                    require('child_process').execSync(`sleep ${delay / 1000}`);
-                    continue;
-                }
-                throw error;
-            }
-        }
-        
-        if (!config) {
-            throw new Error("Failed to read config after multiple attempts");
-        }
-        
-        // Process config as before
+        config = require('./config1.json');
         rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
-        
         if (!config.RC1 || !config.RC2) {
             throw new Error("Config must contain both RC1 and RC2");
         }
-        
         // Parse quoted boolean strings to actual booleans
         config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
         config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
-        config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-                
         if (typeof config.actionOnEnemy === 'undefined') {
             throw new Error("Config must contain actionOnEnemy");
         }
-        
-        // Make config globally available
-        global.config = config;
-        global.rivalNames = rivalNames;
-        
-        console.log(`✅ Configuration updated instantly at ${new Date().toISOString()}:`, {
-            RC1: config.RC1,
-            RC2: config.RC2,
-            planetName: config.planetName,
+        // Timing states will now be initialized per connection
+        console.log("Configuration updated. Timing states will be initialized per connection.");
+        console.log("Configuration updated:", {
             rivalNames,
             standOnEnemy: config.standOnEnemy,
-            actionOnEnemy: config.actionOnEnemy,
-            aiChatToggle: config.aiChatToggle
+            actionOnEnemy: config.actionOnEnemy
         });
-        
     } catch (error) {
-        console.error("❌ Error updating config:", error);
-    } finally {
-        isUpdating = false;
+        console.error("Error updating config:", error);
     }
 }
 updateConfigValues();
 
-// Set up INSTANT signal handler for immediate updates
-process.on('SIGUSR1', () => {
-    console.log('📡 Received instant reload signal from API!');
-    // Clear any pending debounced updates
-    if (updateTimeout) {
-        clearTimeout(updateTimeout);
-        updateTimeout = null;
-    }
-    // Update immediately
-    updateConfigValues();
-});
-
 fsSync.watch('config1.json', (eventType) => {
     if (eventType === 'change') {
-        debouncedUpdate();
+        console.log('Config file changed, updating values...');
+        updateConfigValues();
     }
 });
-
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = {
-        updateConfigValues,
-        getConfig: () => global.config,
-        getRivalNames: () => global.rivalNames
-    };
-}
-
 
 function genHash(code) {
     const hash = CryptoJS.MD5(code);
@@ -696,7 +614,7 @@ function createConnection() {
                 
                 switch (command) {
                     case "PRIVMSG":
-                        if (config.aiChatToggle === true) {  // Changed from aiChat to aiChatToggle
+                        if (config.aiChat) {
                             // Example message: :<sender_nick> PRIVMSG <target_id> <flag> <sender_id> :<message_content>
                             // Or: PRIVMSG <target_id> <flag> <sender_id> :<message_content>
                             // Based on user's example: PRIVMSG 14358744 1 54531773 :`[R]OLE[X]`, hi
@@ -1476,10 +1394,6 @@ setInterval(maintainMonitoringConnection, 10000);
 recoverUser();
 
 process.on('SIGINT', async () => {
-    console.log('🛑 Received SIGINT, cleaning up...');
-    if (updateTimeout) {
-        clearTimeout(updateTimeout);
-    }
     console.log("Shutting down...");
     await Promise.allSettled(connectionPool.map(conn => conn.cleanup(true)));
     if (activeConnection) await Promise.resolve(activeConnection.cleanup(true));
