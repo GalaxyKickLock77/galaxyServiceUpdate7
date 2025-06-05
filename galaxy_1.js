@@ -625,7 +625,7 @@ function createConnection() {
                 
                 switch (command) {
                     case "PRIVMSG":
-                        if (config.aiChat) {
+                        if (config.aiChatToggle) {
                             // Example message: :<sender_nick> PRIVMSG <target_id> <flag> <sender_id> :<message_content>
                             // Or: PRIVMSG <target_id> <flag> <sender_id> :<message_content>
                             // Based on user's example: PRIVMSG 14358744 1 54531773 :`[R]OLE[X]`, hi
