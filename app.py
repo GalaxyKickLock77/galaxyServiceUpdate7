@@ -3,6 +3,7 @@ import subprocess
 import json
 import os
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask_cors import CORS
 import signal
@@ -30,7 +31,7 @@ def string_to_bool(value):
     return isinstance(value, str) and value.lower().strip() in ('true', '1', 'yes', 'on') if isinstance(value, str) else bool(value)
 
 def write_config_instant(data, form_number):
-    """Instant config writing with background I/O"""
+    """Instant config writing with atomic file replacement"""
     config = {
         "RC1": data[f'RC1{form_number}'],
         "RC2": data[f'RC2{form_number}'],
@@ -55,12 +56,15 @@ def write_config_instant(data, form_number):
     
     config_cache[form_number] = config
     
-    # Async file write
+    # Async file write with atomic replacement
     def write_bg():
         try:
             config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
-            with open(config_path, 'w') as f:
-                json.dump(config, f, separators=(',', ':'))
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(config_path)) as temp_file:
+                json.dump(config, temp_file, separators=(',', ':'))
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            os.replace(temp_file.name, config_path)
         except Exception as e:
             print(f"Config write error {form_number}: {e}")
     

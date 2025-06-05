@@ -94,29 +94,40 @@ function initializeTimingStates(connection) {
 }
 
 function updateConfigValues() {
-    try {
-        delete require.cache[require.resolve('./config1.json')];
-        config = require('./config1.json');
-        rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
-        if (!config.RC1 || !config.RC2) {
-            throw new Error("Config must contain both RC1 and RC2");
+    let retries = 0;
+    const maxRetries = 3;
+    const retryDelay = 50; // ms
+
+    function tryLoadConfig() {
+        try {
+            delete require.cache[require.resolve('./config1.json')];
+            config = require('./config1.json');
+            rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+            if (!config.RC1 || !config.RC2) {
+                throw new Error("Config must contain both RC1 and RC2");
+            }
+            config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
+            config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
+            if (typeof config.actionOnEnemy === 'undefined') {
+                throw new Error("Config must contain actionOnEnemy");
+            }
+            console.log("Configuration updated:", {
+                rivalNames,
+                standOnEnemy: config.standOnEnemy,
+                actionOnEnemy: config.actionOnEnemy
+            });
+        } catch (error) {
+            if (retries < maxRetries) {
+                retries++;
+                console.log(`Retrying to load config (attempt ${retries}/${maxRetries})...`);
+                setTimeout(tryLoadConfig, retryDelay);
+            } else {
+                console.error("Failed to update config after retries:", error);
+            }
         }
-        // Parse quoted boolean strings to actual booleans
-        config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
-        config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
-        if (typeof config.actionOnEnemy === 'undefined') {
-            throw new Error("Config must contain actionOnEnemy");
-        }
-        // Timing states will now be initialized per connection
-        console.log("Configuration updated. Timing states will be initialized per connection.");
-        console.log("Configuration updated:", {
-            rivalNames,
-            standOnEnemy: config.standOnEnemy,
-            actionOnEnemy: config.actionOnEnemy
-        });
-    } catch (error) {
-        console.error("Error updating config:", error);
     }
+
+    tryLoadConfig();
 }
 updateConfigValues();
 
