@@ -3,6 +3,7 @@ import subprocess
 import json
 import os
 import threading
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask_cors import CORS
 import signal
@@ -30,7 +31,7 @@ def string_to_bool(value):
     return isinstance(value, str) and value.lower().strip() in ('true', '1', 'yes', 'on') if isinstance(value, str) else bool(value)
 
 def write_config_instant(data, form_number):
-    """Instant config writing with background I/O"""
+    """Instant config writing with atomic file replacement"""
     config = {
         "RC1": data[f'RC1{form_number}'],
         "RC2": data[f'RC2{form_number}'],
@@ -50,17 +51,48 @@ def write_config_instant(data, form_number):
         "rival": data[f'Rival{form_number}'].split(',') if isinstance(data[f'Rival{form_number}'], str) else data[f'Rival{form_number}'],
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}']),
-        "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}'])
+        "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}']),
+        # Add timestamp to force file change detection
+        "lastUpdated": int(time.time() * 1000)
     }
     
     config_cache[form_number] = config
     
-    # Async file write
+    # Async file write with atomic replacement
     def write_bg():
         try:
             config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
-            with open(config_path, 'w') as f:
-                json.dump(config, f, separators=(',', ':'))
+            
+            # First, ensure the file exists and is readable
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as test_read:
+                        test_read.read(1)  # Just read 1 byte to test access
+                except Exception as e:
+                    print(f"Warning: Config file {form_number} exists but can't be read: {e}")
+            
+            # Write to temp file and replace atomically
+            with tempfile.NamedTemporaryFile('w', delete=False, dir=os.path.dirname(config_path)) as temp_file:
+                json.dump(config, temp_file, separators=(',', ':'))
+                temp_file.flush()
+                os.fsync(temp_file.fileno())
+            
+            # Replace the file atomically
+            os.replace(temp_file.name, config_path)
+            
+            # Force modification time update and sync to disk
+            current_time = time.time()
+            os.utime(config_path, (current_time, current_time))
+            
+            # Notify PM2 about the config change (optional)
+            try:
+                subprocess.run(['pm2', 'sendSignal', 'SIGUSR2', f'galaxy_{form_number}'], 
+                              timeout=1, capture_output=True)
+            except Exception as e:
+                # This is optional, so just log errors
+                print(f"PM2 signal send error (non-critical): {e}")
+                
+            print(f"Config {form_number} updated successfully at {time.strftime('%H:%M:%S')}")
         except Exception as e:
             print(f"Config write error {form_number}: {e}")
     
@@ -197,19 +229,37 @@ def stop_galaxy(form_number):
 
 @app.route('/update/<int:form_number>', methods=['POST'])
 def update_galaxy(form_number):
-    """Instant config update"""
+    """Instant config update with PM2 notification"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
         data = request.json or {}
-        write_config_instant(data, form_number)
+        config = write_config_instant(data, form_number)
+        
+        # Try to notify the PM2 process about the config change
+        try:
+            # Option 1: Send a signal to the process
+            subprocess.run(['pm2', 'sendSignal', 'SIGUSR2', f'galaxy_{form_number}'], 
+                          timeout=1, capture_output=True)
+            
+            # Option 2: Touch the config file again to ensure timestamp changes
+            config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
+            current_time = time.time()
+            os.utime(config_path, (current_time, current_time))
+            
+            # Option 3: Restart the process if needed (uncomment if other methods fail)
+            # subprocess.run(['pm2', 'restart', f'galaxy_{form_number}'], 
+            #              timeout=2, capture_output=True)
+        except Exception as notify_error:
+            print(f"PM2 notification error (non-critical): {notify_error}")
         
         return jsonify({
             "message": f"Galaxy_{form_number} config updated",
             "status": "updated",
             "form": form_number,
-            "timestamp": int(time.time())
+            "timestamp": int(time.time()),
+            "config_keys": list(config.keys())
         }), 200
         
     except Exception as e:
