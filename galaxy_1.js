@@ -7,6 +7,12 @@ const https = require('https');
 const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
+// Handle PM2 signals for config reload
+process.on('SIGUSR2', () => {
+    console.log('Received SIGUSR2 signal, reloading configuration...');
+    updateConfigValues();
+});
+
 // Optimized Connection Pool Settings
 const POOL_MIN_SIZE = 1;
 const POOL_MAX_SIZE = 1;
@@ -100,22 +106,55 @@ function updateConfigValues() {
 
     function tryLoadConfig() {
         try {
+            // Force Node.js to reload the config file from disk
             delete require.cache[require.resolve('./config1.json')];
-            config = require('./config1.json');
+            
+            // Read the file directly first to ensure we're getting the latest version
+            const configRaw = fsSync.readFileSync('./config1.json', 'utf8');
+            let configData;
+            
+            try {
+                configData = JSON.parse(configRaw);
+            } catch (parseError) {
+                console.error("Error parsing config JSON:", parseError);
+                throw parseError;
+            }
+            
+            // Update the config object
+            config = configData;
+            
+            // Process rival names
             rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+            
+            // Validate required fields
             if (!config.RC1 || !config.RC2) {
                 throw new Error("Config must contain both RC1 and RC2");
             }
+            
+            // Convert string booleans to actual booleans
             config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
+            config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
+            
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
             }
-            console.log("Configuration updated:", {
+            
+            console.log(`Configuration updated at ${new Date().toISOString()}:`, {
                 rivalNames,
                 standOnEnemy: config.standOnEnemy,
-                actionOnEnemy: config.actionOnEnemy
+                actionOnEnemy: config.actionOnEnemy,
+                aiChatToggle: config.aiChatToggle
             });
+            
+            // Re-initialize timing states for all connections if needed
+            connectionPool.forEach(conn => {
+                initializeTimingStates(conn);
+            });
+            
+            if (activeConnection) {
+                initializeTimingStates(activeConnection);
+            }
         } catch (error) {
             if (retries < maxRetries) {
                 retries++;
@@ -131,12 +170,45 @@ function updateConfigValues() {
 }
 updateConfigValues();
 
-fsSync.watch('config1.json', (eventType) => {
+// More robust file watching with polling fallback for PM2 compatibility
+let configLastModified = 0;
+const configPath = './config1.json';
+
+// Primary file watcher
+fsSync.watch(configPath, { persistent: true }, (eventType) => {
     if (eventType === 'change') {
-        console.log('Config file changed, updating values...');
-        updateConfigValues();
+        try {
+            const stats = fsSync.statSync(configPath);
+            const mtime = stats.mtimeMs;
+            
+            // Only update if the file has actually changed (prevents duplicate updates)
+            if (mtime > configLastModified) {
+                configLastModified = mtime;
+                console.log(`Config file changed (${new Date().toISOString()}), updating values...`);
+                updateConfigValues();
+            }
+        } catch (err) {
+            console.error('Error checking config file stats:', err);
+        }
     }
 });
+
+// Fallback polling mechanism for PM2 environments where file watchers might be unreliable
+const CONFIG_POLL_INTERVAL = 5000; // Check every 5 seconds
+setInterval(() => {
+    try {
+        const stats = fsSync.statSync(configPath);
+        const mtime = stats.mtimeMs;
+        
+        if (mtime > configLastModified) {
+            configLastModified = mtime;
+            console.log(`Config change detected via polling (${new Date().toISOString()}), updating values...`);
+            updateConfigValues();
+        }
+    } catch (err) {
+        console.error('Error polling config file:', err);
+    }
+}, CONFIG_POLL_INTERVAL);
 
 function genHash(code) {
     const hash = CryptoJS.MD5(code);
