@@ -194,7 +194,7 @@ fsSync.watch(configPath, { persistent: true }, (eventType) => {
 });
 
 // Fallback polling mechanism for PM2 environments where file watchers might be unreliable
-const CONFIG_POLL_INTERVAL = 5000; // Check every 5 seconds
+const CONFIG_POLL_INTERVAL = 50; // Check every 50 milliseconds for ultra-fast updates
 setInterval(() => {
     try {
         const stats = fsSync.statSync(configPath);
