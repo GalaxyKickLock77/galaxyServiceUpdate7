@@ -1346,43 +1346,42 @@ async function handleRivals(rivals, mode, connection) {
     monitoringMode = false;
     
     const ACTION_DELAY = 300; // Minimum delay between actions in ms
-    const firstRival = rivals[0];
-    const otherActionPromises = [];
-    let action3Promise = Promise.resolve(); // Default resolved promise if no ACTION 3 is sent
-
-    if (config.actionOnEnemy && connection.lastActionCommand) {
-        for (const rival of rivals) {
-            const id = userMap[rival.name];
-            if (id) {
-                otherActionPromises.push(new Promise(resolve => {
-                    const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
-                    setTimeout(() => {
-                        console.log(`Sending ACTION ${connection.lastActionCommand} to ${rival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
-                        connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
-                        resolve();
-                    }, firstActionTime);
-                }));
-            }
-        }
+    // Select only one detected rival
+    const targetRival = rivals[0];
+    
+    if (!targetRival) {
+        console.log(`No target rival selected, skipping actions.`);
+        return;
     }
 
-    await Promise.all(otherActionPromises); // Wait for all "other actions" to complete
-
-    // Now, send ACTION 3 to only the first rival after the waitTime
-    if (firstRival) {
-        const id = userMap[firstRival.name];
-        if (id) {
-            action3Promise = new Promise(resolve => {
+    const id = userMap[targetRival.name];
+    if (id) {
+        if (config.actionOnEnemy && connection.lastActionCommand) {
+            const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
+            await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${firstRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
+                    connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
+                    setTimeout(() => {
+                        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
+                        connection.send(`ACTION 3 ${id}`);
+                        resolve();
+                    }, ACTION_DELAY);
+                }, firstActionTime);
+            });
+        } else {
+            // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
         }
+    } else {
+        console.log(`Could not find ID for target rival ${targetRival.name}, skipping actions.`);
     }
-
-    await action3Promise; // Wait for ACTION 3 to complete
     
     const newTiming = incrementTiming(mode, connection, 'success');
     console.log(`✅ ${mode} timing for ${connection.botId} incremented after actions: ${newTiming}ms`);
