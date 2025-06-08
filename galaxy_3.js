@@ -2,29 +2,61 @@ const WebSocket = require('ws');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const CryptoJS = require('crypto-js');
-//const fetch = require('node-fetch'); // Added for HTTP requests
 const path = require('path');
 const https = require('https');
 const { URL } = require('url');
+const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
+
+// Handle PM2 signals for config reload
+process.on('SIGUSR2', () => {
+    console.log('Received SIGUSR2 signal, reloading configuration...');
+    updateConfigValues();
+});
+
+// Optimized Connection Pool Settings
+const POOL_MIN_SIZE = 1;
+const POOL_MAX_SIZE = 1;
+const POOL_TARGET_SIZE = 1;
+const POOL_HEALTH_CHECK_INTERVAL = 10000; // 10 seconds for frequent checks
+const CONNECTION_MAX_AGE = 10 * 60 * 1000; // 2 minutes
+const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
+
+// Prison Pool Settings
+const PRISON_POOL_MIN_SIZE = 1;
+const PRISON_POOL_MAX_SIZE = 1;
+const PRISON_POOL_TARGET_SIZE = 1;
+const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000; // 1 minute for rapid turnover
+
+let poolMaintenanceInProgress = false;
+let prisonMaintenanceInProgress = false;
+let lastCloseTime = 0;
 // Configuration
 let config;
 let rivalNames = [];
-let recoveryCode;
 let userMap = {};
 let reconnectAttempt = 0;
 let currentMode = null;
 
 // Connection pool settings
-const MAX_POOL_SIZE = 2;
 const MAX_RECONNECT_ATTEMPTS = 5;
-const RECONNECT_BACKOFF_BASE = 100;
+const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
 const connectionPool = [];
 let activeConnection = null;
-let poolWarmupInProgress = false;
 
-const PRISON_POOL_SIZE = 3; // Dedicated prison connections
+// Prison pool settings
 const prisonConnectionPool = [];
-let prisonPoolWarmupInProgress = false;
+
+let attackTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
+
+let defenseTimingState = {
+    currentTime: null,
+    lastMode: null,
+    consecutiveErrors: 0
+};
 
 // Connection states
 const CONNECTION_STATES = {
@@ -41,45 +73,142 @@ let currentAttackTime;
 let currentDefenceTime;
 let monitoringMode = true;
 
-function updateConfigValues() {
-    try {
-        delete require.cache[require.resolve('./config3.json')];
-        config = require('./config3.json');
-        rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
-        recoveryCode = config.RC;
-        
-        currentAttackTime = config.startAttackTime;
-        currentDefenceTime = config.startDefenceTime;
-        
-        console.log("Configuration updated:", { 
-            rivalNames, 
-            recoveryCode,
-            attackSettings: {
-                start: config.startAttackTime,
-                stop: config.stopAttackTime,
-                interval: config.attackIntervalTime,
-                current: currentAttackTime
-            },
-            defenceSettings: {
-                start: config.startDefenceTime,
-                stop: config.stopDefenceTime,
-                interval: config.defenceIntervalTime,
-                current: currentDefenceTime
-            }
-        });
-    } catch (error) {
-        console.error("Error updating config:", error);
-    }
+// Recovery code alternation
+let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
+
+function getNextRC() {
+    lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
+    return lastUsedRC;
 }
 
+function initializeTimingStates(connection) {
+    const rcKey = connection.rcKey;
+    connection.attackTimingState = {
+        currentTime: config[`${rcKey}_startAttackTime`],
+        lastMode: null,
+        consecutiveErrors: 0
+    };
+    connection.defenseTimingState = {
+        currentTime: config[`${rcKey}_startDefenceTime`],
+        lastMode: null,
+        consecutiveErrors: 0
+    };
+    console.log(`Timing states initialized for ${connection.botId || 'new connection'} (${rcKey}):`, {
+        attack: connection.attackTimingState.currentTime,
+        defense: connection.defenseTimingState.currentTime
+    });
+}
+
+function updateConfigValues() {
+    let retries = 0;
+    const maxRetries = 3;
+    const retryDelay = 50; // ms
+
+    function tryLoadConfig() {
+        try {
+            // Force Node.js to reload the config file from disk
+            delete require.cache[require.resolve('./config3.json')];
+            
+            // Read the file directly first to ensure we're getting the latest version
+            const configRaw = fsSync.readFileSync('./config3.json', 'utf8');
+            let configData;
+            
+            try {
+                configData = JSON.parse(configRaw);
+            } catch (parseError) {
+                console.error("Error parsing config JSON:", parseError);
+                throw parseError;
+            }
+            
+            // Update the config object
+            config = configData;
+            
+            // Process rival names
+            rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+            
+            // Validate required fields
+            if (!config.RC1 || !config.RC2) {
+                throw new Error("Config must contain both RC1 and RC2");
+            }
+            
+            // Convert string booleans to actual booleans
+            config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
+            config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
+            config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
+            
+            if (typeof config.actionOnEnemy === 'undefined') {
+                throw new Error("Config must contain actionOnEnemy");
+            }
+            
+            console.log(`Configuration updated at ${new Date().toISOString()}:`, {
+                rivalNames,
+                standOnEnemy: config.standOnEnemy,
+                actionOnEnemy: config.actionOnEnemy,
+                aiChatToggle: config.aiChatToggle
+            });
+            
+            // Re-initialize timing states for all connections if needed
+            connectionPool.forEach(conn => {
+                initializeTimingStates(conn);
+            });
+            
+            if (activeConnection) {
+                initializeTimingStates(activeConnection);
+            }
+        } catch (error) {
+            if (retries < maxRetries) {
+                retries++;
+                console.log(`Retrying to load config (attempt ${retries}/${maxRetries})...`);
+                setTimeout(tryLoadConfig, retryDelay);
+            } else {
+                console.error("Failed to update config after retries:", error);
+            }
+        }
+    }
+
+    tryLoadConfig();
+}
 updateConfigValues();
 
-fsSync.watch('config1.json', (eventType) => {
+// More robust file watching with polling fallback for PM2 compatibility
+let configLastModified = 0;
+const configPath = './config3.json';
+
+// Primary file watcher
+fsSync.watch(configPath, { persistent: true }, (eventType) => {
     if (eventType === 'change') {
-        console.log('Config file changed, updating values...');
-        updateConfigValues();
+        try {
+            const stats = fsSync.statSync(configPath);
+            const mtime = stats.mtimeMs;
+            
+            // Only update if the file has actually changed (prevents duplicate updates)
+            if (mtime > configLastModified) {
+                configLastModified = mtime;
+                console.log(`Config file changed (${new Date().toISOString()}), updating values...`);
+                updateConfigValues();
+            }
+        } catch (err) {
+            console.error('Error checking config file stats:', err);
+        }
     }
 });
+
+// Fallback polling mechanism for PM2 environments where file watchers might be unreliable
+const CONFIG_POLL_INTERVAL = 50; // Check every 50 milliseconds for ultra-fast updates
+setInterval(() => {
+    try {
+        const stats = fsSync.statSync(configPath);
+        const mtime = stats.mtimeMs;
+        
+        if (mtime > configLastModified) {
+            configLastModified = mtime;
+            console.log(`Config change detected via polling (${new Date().toISOString()}), updating values...`);
+            updateConfigValues();
+        }
+    } catch (err) {
+        console.error('Error polling config file:', err);
+    }
+}, CONFIG_POLL_INTERVAL);
 
 function genHash(code) {
     const hash = CryptoJS.MD5(code);
@@ -88,142 +217,349 @@ function genHash(code) {
     return str;
 }
 
-async function warmPrisonConnectionPool() {
-    if (prisonPoolWarmupInProgress) {
-        console.log(`Prison pool warmup skipped: already in progress`);
+function incrementTiming(mode, connection, errorType = 'success') {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
+    const rcKey = connection.rcKey;
+    const configStart = isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`];
+    const configStop = isAttack ? config[`${rcKey}_stopAttackTime`] : config[`${rcKey}_stopDefenceTime`];
+    const configInterval = isAttack ? config[`${rcKey}_attackIntervalTime`] : config[`${rcKey}_defenceIntervalTime`];
+    
+    if (errorType !== 'success') {
+        timingState.consecutiveErrors++;
+    } else {
+        timingState.consecutiveErrors = 0;
+    }
+    
+    const oldTime = timingState.currentTime;
+    timingState.currentTime += configInterval;
+    
+    if (timingState.currentTime > configStop) {
+        timingState.currentTime = configStart;
+        timingState.consecutiveErrors = 0;
+        console.log(`${mode} timing for ${connection.botId} (${rcKey}) cycled back to start: ${timingState.currentTime}ms`);
+    } else {
+        console.log(`${mode} timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
+    }
+    
+    timingState.lastMode = mode;
+    return timingState.currentTime;
+}
+
+function getCurrentTiming(mode, connection) {
+    const isAttack = mode === 'attack';
+    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
+    const rcKey = connection.rcKey;
+    return timingState.currentTime || (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
+}
+
+async function optimizedConnectionPoolMaintenance() {
+    if (poolMaintenanceInProgress) {
+        console.log(`Pool maintenance skipped: already in progress`);
         return;
     }
     
     try {
-        prisonPoolWarmupInProgress = true;
-        console.log(`Warming PRISON connection pool (current size: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
-        
-        // Clean up stale connections
+        poolMaintenanceInProgress = true;
         const now = Date.now();
-        const STALE_THRESHOLD = 3 * 60 * 1000; // 3 minutes for prison connections
+        
+        const initialPoolSize = connectionPool.length;
+        for (let i = connectionPool.length - 1; i >= 0; i--) {
+            const conn = connectionPool[i];
+            const age = now - conn.createdAt;
+            const idleTime = now - conn.lastUsed;
+            
+            if (age > CONNECTION_MAX_AGE || idleTime > CONNECTION_IDLE_TIMEOUT || 
+                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY) || !conn.registrationData) {
+                console.log(`Pruning connection ${conn.botId || 'none'} (Age: ${Math.round(age/1000)}s, Idle: ${Math.round(idleTime/1000)}s, State: ${conn.state})`);
+                await conn.cleanup();
+                connectionPool.splice(i, 1);
+            }
+        }
+        
+        const healthyConnections = connectionPool.filter(conn => 
+            conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData && now - conn.lastUsed < CONNECTION_IDLE_TIMEOUT);
+        
+        console.log(`Pool status - Total: ${connectionPool.length}, Healthy: ${healthyConnections.length}, Target: ${POOL_TARGET_SIZE}`);
+        
+        if (healthyConnections.length < POOL_TARGET_SIZE) {
+            const needed = Math.min(POOL_TARGET_SIZE - healthyConnections.length, POOL_MAX_SIZE - connectionPool.length);
+            if (needed > 0) {
+                console.log(`Creating ${needed} new pool connection(s)`);
+                await createPoolConnections(needed);
+            }
+        }
+        
+        if (initialPoolSize !== connectionPool.length) {
+            console.log(`Pool maintenance complete: ${initialPoolSize} → ${connectionPool.length} connections`);
+        }
+    } catch (err) {
+        console.error("Error in connection pool maintenance:", err);
+    } finally {
+        poolMaintenanceInProgress = false;
+    }
+}
+
+async function createPoolConnections(count) {
+    const creationPromises = [];
+    
+    for (let i = 0; i < count; i++) {
+        const conn = createConnection();
+        creationPromises.push((async () => {
+            try {
+                console.log(`Initializing pool connection ${(i+1)}/${count}`);
+                await conn.initialize(true);
+                if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                    connectionPool.push(conn);
+                    console.log(`✅ Added connection to pool (${connectionPool.length}/${POOL_MAX_SIZE})`);
+                    return true;
+                } else {
+                    console.warn(`❌ Connection failed to reach proper state: ${conn.state}`);
+                    await conn.cleanup();
+                    return false;
+                }
+            } catch (error) {
+                console.error(`❌ Failed to create pool connection:`, error.message || error);
+                await conn.cleanup();
+                return false;
+            }
+        })());
+    }
+    
+    const results = await Promise.allSettled(creationPromises);
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
+    console.log(`Pool connection creation complete: ${successful}/${count} successful`);
+}
+
+async function optimizedPrisonPoolMaintenance() {
+    if (prisonMaintenanceInProgress) {
+        console.log(`Prison pool maintenance skipped: already in progress`);
+        return;
+    }
+    
+    try {
+        prisonMaintenanceInProgress = true;
+        const now = Date.now();
+        
+        const initialSize = prisonConnectionPool.length;
         for (let i = prisonConnectionPool.length - 1; i >= 0; i--) {
             const conn = prisonConnectionPool[i];
-            if (now - conn.lastUsed > STALE_THRESHOLD || 
-                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY)) {
-                console.log(`Pruning PRISON connection ${conn.botId || 'none'} from pool`);
-                conn.cleanup();
+            const age = now - conn.createdAt;
+            const idleTime = now - conn.lastUsed;
+            
+            if (age > PRISON_CONNECTION_MAX_AGE || idleTime > CONNECTION_IDLE_TIMEOUT || 
+                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY) || !conn.registrationData) {
+                console.log(`Pruning PRISON connection ${conn.botId || 'none'} (Age: ${Math.round(age/1000)}s)`);
+                await conn.cleanup();
                 prisonConnectionPool.splice(i, 1);
             }
         }
         
-        const connectionsToAdd = Math.max(0, PRISON_POOL_SIZE - prisonConnectionPool.length);
-        if (connectionsToAdd > 0) {
-            console.log(`Adding ${connectionsToAdd} new PRISON warm connection(s)`);
-            
-            const prisonPromises = [];
-            for (let i = 0; i < connectionsToAdd; i++) {
-                const conn = createConnection();
-                conn.isPrisonConnection = true; // Mark as prison connection
-                
-                prisonPromises.push((async () => {
-                    try {
-                        console.log(`Initializing PRISON connection ${i+1}/${connectionsToAdd}`);
-                        await conn.initialize(true);
-                        if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
-                            prisonConnectionPool.push(conn);
-                            console.log(`Added PRISON connection to pool (total: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
-                            return true;
-                        } else {
-                            conn.cleanup();
-                            return false;
-                        }
-                    } catch (error) {
-                        console.error(`Failed to initialize PRISON connection:`, error.message || error);
-                        conn.cleanup();
-                        return false;
-                    }
-                })());
+        const healthyPrisonConnections = prisonConnectionPool.filter(conn => 
+            conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
+        
+        console.log(`Prison pool status - Total: ${prisonConnectionPool.length}, Healthy: ${healthyPrisonConnections.length}, Target: ${PRISON_POOL_TARGET_SIZE}`);
+        
+        if (healthyPrisonConnections.length < PRISON_POOL_TARGET_SIZE) {
+            const needed = Math.min(PRISON_POOL_TARGET_SIZE - healthyPrisonConnections.length, PRISON_POOL_MAX_SIZE - prisonConnectionPool.length);
+            if (needed > 0) {
+                console.log(`Creating ${needed} new PRISON connection(s)`);
+                await createPrisonConnections(needed);
             }
-            
-            await Promise.allSettled(prisonPromises);
         }
         
-        console.log(`PRISON connection pool warm-up complete. Pool size: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE}`);
+        if (initialSize !== prisonConnectionPool.length) {
+            console.log(`Prison maintenance complete: ${initialSize} → ${prisonConnectionPool.length} connections`);
+        }
     } catch (err) {
-        console.error("Error in warmPrisonConnectionPool:", err);
+        console.error("Error in prison pool maintenance:", err);
     } finally {
-        prisonPoolWarmupInProgress = false;
+        prisonMaintenanceInProgress = false;
     }
 }
 
-setInterval(() => {
-    if (!prisonPoolWarmupInProgress) {
-        warmPrisonConnectionPool().catch(err => {
-            console.error("Error maintaining prison connection pool:", err);
-        });
+async function createPrisonConnections(count) {
+    const creationPromises = [];
+    
+    for (let i = 0; i < count; i++) {
+        const conn = createConnection();
+        conn.isPrisonConnection = true;
+        creationPromises.push((async () => {
+            try {
+                console.log(`Initializing PRISON connection ${i+1}/${count}`);
+                await conn.initialize(true);
+                if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
+                    prisonConnectionPool.push(conn);
+                    console.log(`✅ Added PRISON connection to pool (${prisonConnectionPool.length}/${PRISON_POOL_MAX_SIZE})`);
+                    return true;
+                } else {
+                    await conn.cleanup();
+                    return false;
+                }
+            } catch (error) {
+                console.error(`❌ Failed to create PRISON connection:`, error.message || error);
+                await conn.cleanup();
+                return false;
+            }
+        })());
     }
-}, 15000);
-
-setInterval(() => {
-    console.log(`📊 Pool Status - Regular: ${connectionPool.length}/${MAX_POOL_SIZE}, Prison: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE}`);
-}, 60000); // Log every minute
+    
+    const results = await Promise.allSettled(creationPromises);
+    const successful = results.filter(r => r.status === 'fulfilled' && r.value).length;
+    console.log(`Prison connection creation complete: ${successful}/${count} successful`);
+}
 
 async function getPrisonConnection() {
     console.log(`Getting PRISON connection from dedicated pool...`);
-    
-    const warmPrisonConnections = prisonConnectionPool.filter(conn => 
-        conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
-    
+    const warmPrisonConnections = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
     console.log(`PRISON warm connections available: ${warmPrisonConnections.length}/${prisonConnectionPool.length}`);
     
     if (warmPrisonConnections.length > 0) {
-        // Get the most recently created prison connection (likely fastest)
         let newestIdx = -1;
         let newestTime = 0;
         for (let i = 0; i < prisonConnectionPool.length; i++) {
             const conn = prisonConnectionPool[i];
-            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
-                if (conn.createdAt > newestTime) {
-                    newestTime = conn.createdAt;
-                    newestIdx = i;
-                }
+            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData && conn.createdAt > newestTime) {
+                newestTime = conn.createdAt;
+                newestIdx = i;
             }
         }
         
         if (newestIdx !== -1) {
             const chosenConn = prisonConnectionPool[newestIdx];
             prisonConnectionPool.splice(newestIdx, 1);
-            console.log(`⚡ Using PRISON connection from dedicated pool (pool size now: ${prisonConnectionPool.length}/${PRISON_POOL_SIZE})`);
-            
+            console.log(`⚡ Using PRISON connection from dedicated pool (pool size now: ${prisonConnectionPool.length}/${PRISON_POOL_MAX_SIZE})`);
             try {
                 console.time('prisonWarmActivation');
                 await chosenConn.activateWarmConnection();
                 console.timeEnd('prisonWarmActivation');
                 activeConnection = chosenConn;
-                
-                // Immediately warm up the prison pool again
-                Promise.resolve().then(() => {
-                    warmPrisonConnectionPool().catch(err => {
-                        console.error("Error re-warming prison pool:", err);
-                    });
-                });
-                
+                Promise.resolve().then(() => optimizedPrisonPoolMaintenance().catch(err => console.error("Error re-warming prison pool:", err)));
                 return chosenConn;
             } catch (error) {
                 console.error("Failed to activate PRISON connection:", error.message || error);
-                chosenConn.cleanup();
+                await chosenConn.cleanup();
                 throw error;
             }
         }
     }
     
-    // Fallback to regular connection if no prison connections available
     console.log("No PRISON connections available, falling back to regular pool");
     return getConnection(true);
 }
 
+async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
+    const now = Date.now();
+    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
+        const waitTime = 1000 - (now - lastCloseTime);
+        console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
+    console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
+    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && 
+        activeConnection.socket && activeConnection.socket.readyState === WebSocket.OPEN) {
+        console.log(`Reusing existing active connection ${activeConnection.botId}`);
+        activeConnection.lastUsed = Date.now();
+        return activeConnection;
+    }
+    
+    // Ensure no active connection is in the process of closing
+    if (activeConnection) {
+        console.log(`Waiting for active connection ${activeConnection.botId} to fully close...`);
+        await activeConnection.cleanupPromise;
+        activeConnection = null;
+    }
+    
+    if (activateFromPool) {
+        const healthyConnections = connectionPool.filter(conn => 
+            conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData && Date.now() - conn.lastUsed < CONNECTION_IDLE_TIMEOUT);
+        console.log(`Healthy pool connections available: ${healthyConnections.length}/${connectionPool.length}`);
+        
+        if (healthyConnections.length > 0) {
+            healthyConnections.sort((a, b) => b.createdAt - a.createdAt);
+            const chosenConn = healthyConnections[0];
+            const poolIndex = connectionPool.indexOf(chosenConn);
+            if (poolIndex !== -1) {
+                connectionPool.splice(poolIndex, 1);
+                console.log(`⚡ Using connection from pool (pool size now: ${connectionPool.length}/${POOL_MAX_SIZE})`);
+                try {
+                    console.time('connectionActivation');
+                    await chosenConn.activateWarmConnection();
+                    console.timeEnd('connectionActivation');
+                    activeConnection = chosenConn;
+                    if (connectionPool.length < POOL_MIN_SIZE) {
+                        console.log(`Pool running low (${connectionPool.length}), triggering maintenance`);
+                        Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in triggered pool maintenance:", err)));
+                    }
+                    return chosenConn;
+                } catch (error) {
+                    console.error("Failed to activate pool connection:", error.message || error);
+                    await chosenConn.cleanup();
+                }
+            }
+        }
+    }
+    
+    console.log("Creating new connection (pool unavailable or disabled)");
+    const newConn = createConnection();
+    try {
+        console.time('newConnectionCreation');
+        await newConn.initialize(false);
+        console.timeEnd('newConnectionCreation');
+        activeConnection = newConn;
+        Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in post-creation pool maintenance:", err)));
+        return newConn;
+    } catch (error) {
+        console.error("Failed to create new connection:", error.message || error);
+        await newConn.cleanup();
+        throw error;
+    }
+}
+
+async function getMonitoringConnection() {
+    return getConnection(false);
+}
+
+async function tryReconnectWithBackoff() {
+    reconnectAttempt++;
+    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 1000);
+    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
+    return new Promise((resolve, reject) => {
+        setTimeout(async () => {
+            try {
+                const conn = await getConnection(true);
+                resolve(conn);
+            } catch (error) {
+                console.error(`Reconnect attempt ${reconnectAttempt} failed:`, error.message || error);
+                if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
+                    try {
+                        const conn = await tryReconnectWithBackoff();
+                        resolve(conn);
+                    } catch (err) {
+                        reject(err);
+                    }
+                } else {
+                    console.error(`Giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
+                    reconnectAttempt = 0;
+                    reject(new Error("Maximum reconnection attempts reached"));
+                }
+            }
+        }, backoffTime);
+    });
+}
+
 function createConnection() {
+    const rcKey = getNextRC();
+    const rcValue = config[rcKey];
+    console.log(`Creating connection with ${rcKey}: ${rcValue}`);
     const conn = {
         socket: null,
         state: CONNECTION_STATES.CLOSED,
         hash: null,
         botId: null,
-        password: null, // Store password for HTTP requests
+        password: null,
+        nick: null,
         lastUsed: Date.now(),
         authenticating: false,
         initPromise: null,
@@ -231,8 +567,16 @@ function createConnection() {
         createdAt: Date.now(),
         connectionTimeout: null,
         registrationData: null,
-        prisonState: 'IDLE', // State for prison automation
-        prisonTimeout: null, // Timeout for prison automation
+        prisonState: 'IDLE',
+        prisonTimeout: null,
+        userCommandRetryCount: 0,
+        recoveryCode: rcValue,
+        rcKey: rcKey,
+        cleanupResolve: null,
+        cleanupPromise: null,
+        lastActionCommand: null, // Track last action command
+        attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
+        defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -247,43 +591,33 @@ function createConnection() {
         },
         
         initialize: function(stopAtHash = false) {
-            if (this.initPromise) {
-                return this.initPromise;
-            }
+            if (this.initPromise) return this.initPromise;
             
             this.initPromise = new Promise((resolve, reject) => {
                 try {
-                    if (this.socket) {
-                        this.cleanup();
-                    }
-                    
+                    if (this.socket) this.cleanup();
                     this.state = CONNECTION_STATES.CONNECTING;
                     this.authenticating = true;
-                    console.log(`Initializing new connection (stopAtHash: ${stopAtHash})...`);
+                    console.log(`Initializing new connection with ${this.rcKey}: ${this.recoveryCode} (stopAtHash: ${stopAtHash})...`);
                     
-                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
-                        rejectUnauthorized: false,
-                        handshakeTimeout: 3000
-                    });
-                    
+                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", { rejectUnauthorized: false, handshakeTimeout: 1000 });
                     this.connectionTimeout = setTimeout(() => {
                         console.log("Connection initialization timeout");
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 5000);
+                    }, 3000);
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
                         console.log("WebSocket connected, initializing identity");
                         this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                        initializeTimingStates(this); // Initialize timing states for this connection
                     });
                     
-                    this.socket.on('message', (data) => {
+                    this.socket.on('message', async (data) => {
                         const message = data.toString().trim();
-                        
                         if (stopAtHash && this.state === CONNECTION_STATES.HASH_RECEIVED) {
-                            console.log(`Warm pool connection [${this.botId || 'connecting'}] received message but stopping at hash: ${message}`);
                             if (message.startsWith("REGISTER")) {
                                 console.log("Storing registration data for later activation");
                                 this.registrationData = message;
@@ -293,34 +627,30 @@ function createConnection() {
                                 return;
                             }
                         }
-                        
-                        this.handleMessage(message, resolve, reject, stopAtHash);
+                        await this.handleMessage(message, resolve, reject, stopAtHash);
                     });
                     
                     this.socket.on('close', () => {
-                        console.log(`WebSocket [${this.botId || 'connecting'}] closed (state: ${this.state})`);
-                        if (this.authenticating) {
-                            this.authenticating = false;
-                            clearTimeout(this.connectionTimeout);
-                            reject(new Error("Connection closed during authentication"));
-                        }
-                        this.state = CONNECTION_STATES.CLOSED;
-                        const index = connectionPool.indexOf(this);
-                        if (index !== -1) {
-                            connectionPool.splice(index, 1);
-                        }
-                        if (this === activeConnection) {
-                            console.log("Active connection closed");
-                            console.log("Getting new connection immediately");
-                            activeConnection = null;
-                            Promise.resolve().then(() => {
-                                return getConnection(true).catch(err => {
-                                    console.error("Failed to get new connection after close:", err);
-                                    return tryReconnectWithBackoff();
-                                });
-                            });
-                        }
-                    });
+                    console.log(`WebSocket [${this.botId || 'connecting'}] closed (state: ${this.state})`);
+                    if (this.authenticating) {
+                        this.authenticating = false;
+                        clearTimeout(this.connectionTimeout);
+                        reject(new Error("Connection closed during authentication"));
+                    }
+                    this.state = CONNECTION_STATES.CLOSED;
+                    if (this.cleanupResolve) {
+                        this.cleanupResolve();
+                        this.cleanupResolve = null;
+                        this.cleanupPromise = null;
+                    }
+                    const index = connectionPool.indexOf(this);
+                    if (index !== -1) connectionPool.splice(index, 1);
+                    if (this === activeConnection) {
+                        console.log("Active connection closed");
+                        activeConnection = null;
+                    }
+                    lastCloseTime = Date.now(); // Added here
+                });
                     
                     this.socket.on('error', (error) => {
                         console.error(`WebSocket [${this.botId || 'connecting'}] error:`, error.message || error);
@@ -336,301 +666,348 @@ function createConnection() {
                     this.authenticating = false;
                     reject(err);
                 }
-            }).finally(() => {
-                this.initPromise = null;
-            });
+            }).finally(() => this.initPromise = null);
             
             return this.initPromise;
         },
         
-        handleMessage: function(message, resolve, reject, stopAtHash = false) {
-    try {
-        console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
-        this.lastReceivedMessage = message;
-        
-        // Exact match for prison keywords
-        const prisonWords = ["PRISON", "Prison", "Тюрьма"];
-        if (prisonWords.some(word => message.split(/\s+/).includes(word))) {
-            console.log(`🔒 Exact prison keyword detected: "${message}"`);
-            handlePrisonAutomation(this);
-            return;
-        }
-        
-        const colonIndex = message.indexOf(" :");
-        let payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
-        const parts = message.split(/\s+/);
-        
-        // Handle messages with prefix (like :Надзиратель KICK ...)
-        let command = parts[0];
-        let commandIndex = 0;
-        
-        // If the first part starts with :, the actual command is the second part
-        if (parts[0].startsWith(':') && parts.length > 1) {
-            command = parts[1];
-            commandIndex = 1;
-            console.log(`Message has prefix, actual command: ${command}`);
-        }
-        
-        switch (command) {
-            case "PING":
-                this.send("PONG");
-                break;
-            case "HAAAPSI":
-                if (parts.length >= commandIndex + 2) {
-                    const code = parts[commandIndex + 1];
-                    this.hash = genHash(code);
-                    console.log(`Generated hash [${this.botId || 'connecting'}]: ${this.hash}`);
-                    this.send(`RECOVER ${recoveryCode}`);
-                    this.state = CONNECTION_STATES.HASH_RECEIVED;
-                    if (stopAtHash) {
-                        console.log(`Warm pool connection reached HASH_RECEIVED state`);
-                    }
+        handleMessage: async function(message, resolve, reject, stopAtHash = false) {
+            try {
+                console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
+                this.lastReceivedMessage = message;
+                
+                const prisonWords = ["PRISON", "Prison", "Тюрьма"];
+                if (prisonWords.some(word => message.split(/\s+/).includes(word))) {
+                    console.log(`🔒 Exact prison keyword detected: "${message}"`);
+                    handlePrisonAutomation(this);
+                    return;
                 }
-                break;
-            case "REGISTER":
-                if (parts.length >= commandIndex + 4) {
-                    this.botId = parts[commandIndex + 1];
-                    this.password = parts[commandIndex + 2]; // Store password
-                    const nick = parts[commandIndex + 3];
-                    if (stopAtHash) {
-                        this.registrationData = message;
-                        console.log(`Stored registration data for warm pool connection [${this.botId}]`);
-                        clearTimeout(this.connectionTimeout);
-                        this.authenticating = false;
-                        resolve(this);
-                        return;
-                    }
-                    if (this.hash) {
-                        this.send(`USER ${this.botId} ${this.password} ${nick} ${this.hash}`);
-                        console.log(`Authenticated with USER command [${this.botId}]`);
-                    }
+                
+                const colonIndex = message.indexOf(" :");
+                let payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
+                const parts = message.split(/\s+/);
+                let command = parts[0];
+                let commandIndex = 0;
+                
+                if (parts[0].startsWith(':') && parts.length > 1) {
+                    command = parts[1];
+                    commandIndex = 1;
+                    console.log(`Message has prefix, actual command: ${command}`);
                 }
-                break;
-            case "999":
-                this.state = CONNECTION_STATES.AUTHENTICATED;
-                console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
-                this.send("FWLISTVER 0");
-                this.send("ADDONS 0 0");
-                this.send("MYADDONS 0 0");
-                this.send("PHONE 0 0 0 2 :Node.js");
-                this.send("JOIN");
-                currentAttackTime = config.startAttackTime;
-                currentDefenceTime = config.startDefenceTime;
-                this.state = CONNECTION_STATES.READY;
-                this.authenticating = false;
-                reconnectAttempt = 0;
-                if (this.connectionTimeout) {
-                    clearTimeout(this.connectionTimeout);
-                    this.connectionTimeout = null;
-                }
-                console.log(`Connection [${this.botId}] is now READY`);
-                resolve(this);
-                break;
-            case "353":
-                parse353(message, this);
-                break;
-            case "JOIN":
-                handleJoinCommand(parts, this);
-                break;
-            case "PART":
-                if (parts.length >= commandIndex + 2) {
-                    remove_user(parts[commandIndex + 1]);
-                }
-                break;
-			// Add this case in the handleMessage switch statement, after case "451":
-            case "KICK":
-				console.log(`🔓 KICK command detected: ${message}`);
-				if (parts.length >= commandIndex + 3) {
-					const kickedUserId = parts[commandIndex + 2];
-					const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
+                
+                switch (command) {
+                    case "PRIVMSG":
+                        if (config.aiChatToggle) {
+                            // Example message: :<sender_nick> PRIVMSG <target_id> <flag> <sender_id> :<message_content>
+                            // Or: PRIVMSG <target_id> <flag> <sender_id> :<message_content>
+                            // Based on user's example: PRIVMSG 14358744 1 54531773 :`[R]OLE[X]`, hi
+                            
+                            // parts[0] = PRIVMSG
+                            // parts[1] = targetId (our bot's ID)
+                            // parts[2] = flag (e.g., 1)
+                            // parts[3] = senderId (user's ID)
+                            // parts[4] = :`[R]OLE[X]`, hi (start of message content, including the leading colon)
 
-					if (isReleasedFromPrison) {
-						console.log(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
-						
-						// PARALLEL EXECUTION - Start both JOIN and HTTP request simultaneously
-						const parallelTasks = [];
-						
-						// Task 1: JOIN command with minimal delay
-						const joinTask = new Promise((resolve, reject) => {
-						let joinAttempts = 0;
-						const maxJoinAttempts = 10;
-						
-						const attemptJoin = () => {
-							joinAttempts++;
-							console.log(`JOIN attempt ${joinAttempts}/${maxJoinAttempts} for ${this.botId}`);
-							
-							// Set up listener for KICK message with 3-second rule
-							const kickListener = (event) => {
-								const message = event.data.toString().trim();
-								console.log(`JOIN attempt ${joinAttempts} received: ${message}`);
-								
-								// Check for the specific 3-second rule KICK message
-								if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
-									console.log(`🚫 3-second rule detected on JOIN attempt ${joinAttempts}`);
-									
-									// Remove this specific listener
-									this.socket.removeEventListener('message', kickListener);
-									
-									if (joinAttempts < maxJoinAttempts) {
-										console.log(`⏳ Retrying JOIN in 3.5 seconds... (attempt ${joinAttempts + 1}/${maxJoinAttempts})`);
-										setTimeout(() => {
-											attemptJoin();
-										}, 200); // Wait 3.5 seconds before retry
-									} else {
-										console.log(`❌ Max JOIN attempts (${maxJoinAttempts}) reached for ${this.botId}`);
-										reject(new Error(`JOIN failed after ${maxJoinAttempts} attempts due to 3-second rule`));
-									}
-								} else if (message.includes("JOIN") && !message.includes("KICK")) {
-									// Successful JOIN detected
-									console.log(`✅ JOIN successful for ${this.botId} on attempt ${joinAttempts}`);
-									this.socket.removeEventListener('message', kickListener);
-									resolve('join_complete');
-								}
-							};
-							
-							// Add listener before sending JOIN
-							this.socket.addEventListener('message', kickListener);
-							
-							// Send JOIN command
-							setTimeout(() => {
-								this.send(`JOIN ${config.planetName}`);
-								console.log(`JOIN command sent for ${this.botId} (attempt ${joinAttempts})`);
-								
-								// Set timeout for this attempt (in case no response)
-								setTimeout(() => {
-									if (joinAttempts === maxJoinAttempts) {
-										this.socket.removeEventListener('message', kickListener);
-										resolve('join_timeout'); // Don't fail the entire process
-									}
-								}, 5000); // 5 second timeout per attempt
-							}, joinAttempts === 1 ? 2000 : 100); // First attempt after 2s, subsequent attempts after 100ms
-						};
-						
-						// Start the first attempt
-						attemptJoin();
-					});
-						parallelTasks.push(joinTask);
-						
-						// Task 2: HTTP jail_free request (if we have the data ready)
-						if (this.password) {
-							const httpTask = performJailFreeWithRetry(this, 3, 1000) // 3 retries, 1s between
-								.then(() => {
-									console.log(`HTTP jail_free completed for ${this.botId}`);
-									return 'http_complete';
-								})
-								.catch(error => {
-									console.error(`HTTP jail_free failed for ${this.botId}:`, error.message);
-									return 'http_failed';
-								});
-							parallelTasks.push(httpTask);
-						}
-						
-						// Execute all tasks in parallel and handle completion
-						Promise.allSettled(parallelTasks).then((results) => {
-							console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
-							
-							// Short delay then QUIT for fast relogin
-							setTimeout(() => {
-								console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-								this.send("QUIT");
-								this.prisonState = 'IDLE';
-								
-								// Clean up and trigger fast reconnection
-								this.cleanup();
-								if (activeConnection === this) {
-									activeConnection = null;
-								}
-								
-								// Use dedicated prison connection pool for fastest reconnect
-								console.log("⚡ Using dedicated prison connection for relogin");
-								Promise.resolve().then(async () => {
-									try {
-										console.time('prisonRelogin');
-										await getPrisonConnection(); // Use dedicated prison pool
-										console.timeEnd('prisonRelogin');
-										console.log(`✅ Fast prison relogin completed`);
-									} catch (error) {
-										console.error("Failed to get prison connection:", error.message || error);
-										// Fallback to regular connection
-										getConnection(true).catch(retryError => {
-											console.error("Prison relogin fallback failed:", retryError.message || retryError);
-										});
-									}
-								});
-							}, 3000); // Reduced QUIT delay
-						});
-					}
-				}
-				break;
-            case "451":
-            case "452":
-                console.log(`Critical error ${command} [${this.botId || 'connecting'}]: ${message}`);
+                            if (parts.length >= 5) {
+                                const targetId = parts[3]; // Our bot's ID
+                                const senderId = parts[1]; // The user ID who sent the message
+                                
+                                // Only process if the message is for our bot and not from our bot itself
+                                if (targetId === this.botId && senderId !== this.botId) {
+                                    // Reconstruct the full message content starting from the colon after senderId
+                                    const messageContentStartIndex = message.indexOf(':', message.indexOf(senderId)) + 1;
+                                    const fullMessageContent = message.substring(messageContentStartIndex).trim();
+                                    
+                                    let question = fullMessageContent;
+                                    // Check if the message starts with the specific username format and remove it
+                                    const usernamePrefix = '`[R]OLE[X]`, ';
+                                    if (question.startsWith(usernamePrefix)) {
+                                        question = question.substring(usernamePrefix.length).trim();
+                                        console.log(`AI Chat: Removed username prefix, question is now: "${question}"`);
+                                    }
+                                    console.log(`AI Chat: Received question: "${question}"`);
+
+                                    if (question) {
+                                        getMistralChatResponse(question)
+                                            .then(aiResponse => {
+                                                const responseMessage = `PRIVMSG 0 0 :${aiResponse}`;
+                                               setTimeout(() => {
+                                                   this.send(responseMessage);
+                                               }, 200); // 200ms delay for AI chat response
+                                                console.log(`AI Chat: Sent response: "${aiResponse}"`);
+                                            })
+                                            .catch(error => {
+                                                console.error(`AI Chat Error: ${error.message}`);
+                                            });
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    case "PING":
+                        this.send("PONG");
+                        break;
+                    case "HAAAPSI":
+                        if (parts.length >= commandIndex + 2) {
+                            const code = parts[commandIndex + 1];
+                            this.hash = genHash(code);
+                            console.log(`Generated hash [${this.botId || 'connecting'}]: ${this.hash}`);
+                            this.send(`RECOVER ${this.recoveryCode}`);
+                            this.state = CONNECTION_STATES.HASH_RECEIVED;
+                            if (stopAtHash) console.log(`Warm pool connection reached HASH_RECEIVED state`);
+                        }
+                        break;
+                    case "REGISTER":
+                        if (parts.length >= commandIndex + 4) {
+                            this.botId = parts[commandIndex + 1];
+                            this.password = parts[commandIndex + 2];
+                            this.nick = parts[commandIndex + 3];
+                            if (stopAtHash) {
+                                this.registrationData = message;
+                                console.log(`Stored registration data for warm pool connection [${this.botId}]`);
+                                clearTimeout(this.connectionTimeout);
+                                this.authenticating = false;
+                                resolve(this);
+                                return;
+                            }
+                            if (this.hash) {
+                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                                this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
+                                this.send(`RECOVER ${this.recoveryCode}`);
+                                console.log(`Authenticated with USER command [${this.botId}]`);
+                            }
+                        }
+                        break;
+                    case "999":
+                        this.state = CONNECTION_STATES.AUTHENTICATED;
+                        console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
+                        this.send("FWLISTVER 0");
+                        this.send("ADDONS 0 0");
+                        this.send("MYADDONS 0 0");
+                        this.send("PHONE 0 0 0 2 :Node.js");
+                        this.send("JOIN");
+                        this.state = CONNECTION_STATES.READY;
+                        this.authenticating = false;
+                        this.userCommandRetryCount = 0;
+                        reconnectAttempt = 0;
+                        if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+                        console.log(`Connection [${this.botId}] is now READY`);
+                        resolve(this);
+                        break;
+                    case "353":
+                        parse353(message, this);
+                        break;
+                    case "JOIN":
+                        handleJoinCommand(parts, this);
+                        break;
+                    case "PART":
+                        if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
+                        break;
+                    case "KICK":
+                        console.log(`🔓 KICK command detected: ${message}`);
+                        if (parts.length >= commandIndex + 3) {
+                            const kickedUserId = parts[commandIndex + 2];
+                            const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
+                            if (isReleasedFromPrison) {
+                                console.log(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
+                                
+                                const parallelTasks = [];
+                                
+                                const joinTask = new Promise((resolve, reject) => {
+                                    let joinAttempts = 0;
+                                    const maxJoinAttempts = 10;
+                                    
+                                    const attemptJoin = () => {
+                                        joinAttempts++;
+                                        console.log(`JOIN attempt ${joinAttempts}/${maxJoinAttempts} for ${this.botId}`);
+                                        
+                                        const kickListener = (event) => {
+                                            const message = event.data.toString().trim();
+                                            console.log(`JOIN attempt ${joinAttempts} received: ${message}`);
+                                            
+                                            if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
+                                                console.log(`🚫 3-second rule detected on JOIN attempt ${joinAttempts}`);
+                                                this.socket.removeEventListener('message', kickListener);
+                                                if (joinAttempts < maxJoinAttempts) {
+                                                    console.log(`⏳ Retrying JOIN in 200ms... (attempt ${joinAttempts + 1}/${maxJoinAttempts})`);
+                                                    setTimeout(() => {
+                                                        attemptJoin();
+                                                    }, 200);
+                                                } else {
+                                                    console.log(`❌ Max JOIN attempts (${maxJoinAttempts}) reached for ${this.botId}`);
+                                                    reject(new Error(`JOIN failed after ${maxJoinAttempts} attempts due to 3-second rule`));
+                                                }
+                                            } else if (message.includes("JOIN") && !message.includes("KICK")) {
+                                                console.log(`✅ JOIN successful for ${this.botId} on attempt ${joinAttempts}`);
+                                                this.socket.removeEventListener('message', kickListener);
+                                                resolve('join_complete');
+                                            }
+                                        };
+                                        
+                                        this.socket.addEventListener('message', kickListener);
+                                        
+                                        setTimeout(() => {
+                                            this.send(`JOIN ${config.planetName}`);
+                                            console.log(`JOIN command sent for ${this.botId} (attempt ${joinAttempts})`);
+                                            
+                                            setTimeout(() => {
+                                                if (joinAttempts === maxJoinAttempts) {
+                                                    this.socket.removeEventListener('message', kickListener);
+                                                    resolve('join_timeout');
+                                                }
+                                            }, 5000);
+                                        }, joinAttempts === 1 ? 2000 : 100);
+                                    };
+                                    
+                                    attemptJoin();
+                                });
+                                parallelTasks.push(joinTask);
+                                
+                                if (this.password) {
+                                    const httpTask = performJailFreeWithRetry(this, 3, 1000)
+                                        .then(() => {
+                                            console.log(`HTTP jail_free completed for ${this.botId}`);
+                                            return 'http_complete';
+                                        })
+                                        .catch(error => {
+                                            console.error(`HTTP jail_free failed for ${this.botId}:`, error.message);
+                                            return 'http_failed';
+                                        });
+                                    parallelTasks.push(httpTask);
+                                }
+                                
+                                Promise.allSettled(parallelTasks).then(async (results) => {
+                                    console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
+                                    
+                                    console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
+                                    this.send("QUIT :ds");
+                                    this.prisonState = 'IDLE';
+                                    
+                                    console.log(`⚡ Waiting for connection ${this.botId} to close before relogin`);
+                                    await this.cleanup();
+                                    if (activeConnection === this) {
+                                        activeConnection = null;
+                                    }
+                                    
+                                    console.log(`⚡ Connection closed, using dedicated prison connection for relogin`);
+                                    try {
+                                        console.time('prisonRelogin');
+                                        await getPrisonConnection();
+                                        console.timeEnd('prisonRelogin');
+                                        console.log(`✅ Fast prison relogin completed`);
+                                    } catch (error) {
+                                        console.error("Failed to get prison connection:", error.message || error);
+                                        await getConnection(true).catch(retryError => {
+                                            console.error("Prison relogin fallback failed:", retryError.message || retryError);
+                                        });
+                                    }
+                                });
+                            }
+                        }
+                        break;
+                    case "451":
+                        console.log(`Critical error 451 [${this.botId || 'connecting'}]: ${message}`);
+                        if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            this.cleanup();
+                            console.log(`⚡ Got 451 error, trying immediate recovery...`);
+                            reject(new Error(`Critical error 451`));
+                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 451 error:`, e))));
+                            return;
+                        }
+                        this.cleanup();
+                        break;
+                    case "452":
+                        console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
+                        if (this.authenticating && this.userCommandRetryCount < 10) {
+                            this.userCommandRetryCount++;
+                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
+                            if (this.botId && this.password && this.nick && this.hash) {
+                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                            } else {
+                                console.error(`Cannot retry USER command: missing required data [${this.botId}]`);
+                                this.authenticating = false;
+                                clearTimeout(this.connectionTimeout);
+                                this.cleanup();
+                                reject(new Error(`Critical error 452 and missing data for retry`));
+                            }
+                        } else if (this.authenticating) {
+                            this.authenticating = false;
+                            clearTimeout(this.connectionTimeout);
+                            this.cleanup();
+                            const index = connectionPool.indexOf(this);
+                            if (index !== -1) connectionPool.splice(index, 1);
+                            if (this === activeConnection) {
+                                activeConnection = null;
+                            }
+                            console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying immediate recovery...`);
+                            reject(new Error(`Critical error 452 after retries`));
+                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
+                            return;
+                        } else {
+                            this.cleanup();
+                        }
+                        break;
+                    case "850":
+                        if (payload.includes("3 секунд(ы)")) {
+                            console.log(`⚡ 850 error with 3-second rule detected. Immediate QUIT and re-evaluation.`);
+                            this.send("QUIT :ds");
+                            await this.cleanup(); // Ensure connection is fully closed
+                            if (activeConnection === this) {
+                                activeConnection = null;
+                            }
+                            // Now proceed with the original 850 handling logic for timing adjustment and reconnection
+                            console.log(`850 error detected in mode: ${currentMode}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, this, '3second');
+                                console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+                            } else {
+                                console.log(`850 error but no active mode, current mode: ${currentMode}`);
+                            }
+                            // Trigger reconnection after handling the 850 error
+                            Promise.resolve().then(() => getConnection(true, true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
+                            return; // Exit handleMessage after immediate QUIT and re-evaluation
+                        } else {
+                            console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
+                            if (currentMode === 'attack' || currentMode === 'defence') {
+                                const newTiming = incrementTiming(currentMode, this, 'general_error');
+                                console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
+                            }
+                        }
+                        break;
+                    case "854": // Capture last action command
+                        if (parts.length >= 2) {
+                            this.lastActionCommand = parts[1];
+                            console.log(`Updated lastActionCommand to ${this.lastActionCommand} for connection ${this.botId}`);
+                        }
+                        break;
+                }
+                
+                if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
+                    const urlMatch = message.match(/https:\/\/galaxy\.mobstudio\.ru\/services\/\?a=jail_info&usercur=(\d+)&/);
+                    if (urlMatch && urlMatch[1] === this.botId) {
+                        console.log(`Received BROWSER 1 message for jail_info: ${message}`);
+                        if (this.prisonTimeout) clearTimeout(this.prisonTimeout);
+                        performJailFreeWithRetry(this, 3, 500).then(() => {
+                            console.log(`Jail free completed for ${this.botId}, waiting for KICK message...`);
+                            this.prisonState = 'WAITING_FOR_KICK';
+                        }).catch(error => {
+                            console.error(`Error in jail_free for ${this.botId}:`, error);
+                            this.prisonState = 'IDLE';
+                        });
+                    }
+                }
+            } catch (err) {
+                console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
                 if (this.authenticating) {
                     this.authenticating = false;
                     clearTimeout(this.connectionTimeout);
-                    this.cleanup();
-                    console.log(`⚡ Got ${command} error, trying immediate recovery with warm connection...`);
-                    reject(new Error(`Critical error ${command}`));
-                    Promise.resolve().then(() => {
-                        return getConnection(true).catch(err => {
-                            console.error(`Failed to get warm connection after ${command} error:`, err);
-                            return tryReconnectWithBackoff();
-                        });
-                    });
-                    return;
+                    reject(err);
                 }
-                this.cleanup();
-                break;
-            case "850":
-                if (payload.includes("3 секунд(ы)")) {
-                    if (currentMode) {
-                        if (currentMode === 'attack') {
-                            currentAttackTime += config.attackIntervalTime;
-                            if (currentAttackTime > config.stopAttackTime) {
-                                currentAttackTime = config.startAttackTime;
-                            }
-                            console.log(`Hit 3-second rule in attack mode, increased attack time to: ${currentAttackTime}ms`);
-                        } else if (currentMode === 'defence') {
-                            currentDefenceTime += config.defenceIntervalTime;
-                            if (currentDefenceTime > config.stopDefenceTime) {
-                                currentDefenceTime = config.startDefenceTime;
-                            }
-                            console.log(`Hit 3-second rule in defence mode, increased defence time to: ${currentDefenceTime}ms`);
-                        }
-                    }
-                }
-                break;
-        }
-                
-						// Handle prison automation response
-						if (this.prisonState === 'WAITING_FOR_BROWSER_MESSAGE' && message.startsWith("BROWSER 1")) {
-							const urlMatch = message.match(/https:\/\/galaxy\.mobstudio\.ru\/services\/\?a=jail_info&usercur=(\d+)&/);
-							if (urlMatch && urlMatch[1] === this.botId) {
-								console.log(`Received BROWSER 1 message for jail_info: ${message}`);
-								if (this.prisonTimeout) {
-									clearTimeout(this.prisonTimeout);
-									this.prisonTimeout = null;
-								}
-								// FIXED: Use performJailFreeWithRetry instead of performJailFree
-								performJailFreeWithRetry(this, 3, 1000).then(() => {
-									console.log(`Jail free completed for ${this.botId}, waiting for KICK message...`);
-									this.prisonState = 'WAITING_FOR_KICK';  
-								}).catch(error => {
-									console.error(`Error in jail_free for ${this.botId}:`, error);
-									this.prisonState = 'IDLE';
-								});
-							}
-						}
-                        } catch (err) {
-                                console.error(`Error handling message [${this.botId || 'connecting'}]:`, err);
-                                if (this.authenticating) {
-                                        this.authenticating = false;
-                                        clearTimeout(this.connectionTimeout);
-                                        reject(err);
-                                }
-                        }
+            }
         },
-
+        
         activateWarmConnection: function() {
             return new Promise((resolve, reject) => {
                 try {
@@ -638,28 +1015,30 @@ function createConnection() {
                         reject(new Error("Cannot activate connection that isn't properly warmed up"));
                         return;
                     }
-                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}]...`);
+                    console.log(`⚡ Fast-activating warm connection [${this.botId || 'pending'}] with ${this.rcKey}...`);
                     this.authenticating = true;
                     this.connectionTimeout = setTimeout(() => {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 5000);
+                    }, 1000);
+    
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
                         this.botId = parts[1];
-                        this.password = parts[2]; // Store password
-                        const nick = parts[3];
+                        this.password = parts[2];
+                        this.nick = parts[3];
                         if (this.hash) {
-                            this.send(`USER ${this.botId} ${this.password} ${nick} ${this.hash}`);
-                            console.log(`Activated warm connection with USER command [${this.botId}]`);
-                            const originalOnMessage = this.socket.onmessage;
-                            this.socket.onmessage = (event) => {
+                            let authenticationComplete = false;
+    
+                            let authHandler = (event) => {
                                 const message = event.data.toString().trim();
-                                console.log(`Activation received: ${message}`);
-                                if (message.startsWith("999")) {
+                                if (message.startsWith("999") && !authenticationComplete) {
+                                    authenticationComplete = true;
+                                    this.socket.removeEventListener('message', authHandler);
+                                    
                                     this.state = CONNECTION_STATES.AUTHENTICATED;
-                                    console.log(`Warm connection [${this.botId}] authenticated, sending setup commands...`);
+                                    console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
                                     this.send("FWLISTVER 0");
                                     this.send("ADDONS 0 0");
                                     this.send("MYADDONS 0 0");
@@ -667,20 +1046,21 @@ function createConnection() {
                                     this.send("JOIN");
                                     this.state = CONNECTION_STATES.READY;
                                     this.authenticating = false;
+                                    this.userCommandRetryCount = 0;
                                     reconnectAttempt = 0;
-                                    if (this.connectionTimeout) {
-                                        clearTimeout(this.connectionTimeout);
-                                        this.connectionTimeout = null;
-                                    }
-                                    console.log(`⚡ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
-                                    this.socket.onmessage = originalOnMessage;
+                                    
+                                    if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+                                    console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
+                                    
+                                    initializeTimingStates(this); // Initialize timing states for this connection
                                     resolve(this);
-                                    return;
-                                }
-                                if (originalOnMessage) {
-                                    originalOnMessage(event);
                                 }
                             };
+    
+                            this.socket.addEventListener('message', authHandler);
+                            
+                            this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                            console.log(`Activated warm connection with USER command [${this.botId}]`);
                         } else {
                             reject(new Error("No hash available for activation"));
                         }
@@ -696,105 +1076,151 @@ function createConnection() {
             });
         },
         
-        cleanup: function() {
-            try {
-                if (this.connectionTimeout) {
-                    clearTimeout(this.connectionTimeout);
-                    this.connectionTimeout = null;
-                }
-                if (this.prisonTimeout) {
-                    clearTimeout(this.prisonTimeout);
-                    this.prisonTimeout = null;
-                }
-                if (this.socket) {
-                    this.socket.removeAllListeners();
-                    if ([WebSocket.OPEN, WebSocket.CONNECTING].includes(this.socket.readyState)) {
-                        this.socket.terminate();
+        cleanup: function(sendQuit = false) {
+            if (this.cleanupPromise) return this.cleanupPromise;
+            
+            this.cleanupPromise = new Promise((resolve) => {
+                this.cleanupResolve = resolve;
+                try {
+                    if (this.socket) {
+                        if (sendQuit && this.socket.readyState === WebSocket.OPEN) {
+                            this.send("QUIT :ds");
+                        }
+                        setTimeout(() => {
+                            if (this.socket) this.socket.terminate();
+                        }, 100);
+                    } else {
+                        this.state = CONNECTION_STATES.CLOSED;
+                        resolve();
                     }
+                    if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
+                    if (this.prisonTimeout) clearTimeout(this.prisonTimeout);
                     this.socket = null;
+                    this.authenticating = false;
+                } catch (err) {
+                    console.error(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
+                    resolve(); // Resolve even on error to avoid hanging
                 }
-                this.state = CONNECTION_STATES.CLOSED;
-                this.authenticating = false;
-            } catch (err) {
-                console.error(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
-            }
+            });
+            return this.cleanupPromise;
         }
     };
     return conn;
-}
+    }
 
 function parse353(message, connection) {
-        if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
-                    console.log(`🔒 Prison mention detected: "${message}"`);
-                    handlePrisonAutomation(connection);
-                    return;
-                }
+    if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
+        console.log(`🔒 Prison mention detected: "${message}"`);
+        handlePrisonAutomation(connection);
+        return;
+    }
+    
     const colonIndex = message.indexOf(" :");
     const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
-    
     console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
     console.log(`Parsed payload: ${payload}`);
     
-    const tokens = payload.split(' ');
+    const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
     let i = 0;
     let detectedRivals = [];
     
+    console.log(`Tokenized payload into: [${tokens.join(', ')}]`);
+    
     while (i < tokens.length) {
-        let name = tokens[i];
-        let hasPrefix = false;
+        let token = tokens[i];
+        if (token === '-') {
+            console.log(`Skipping separator token: "${token}"`);
+            i++;
+            continue;
+        }
         
-        if (name.length > 1 && (name.startsWith('@') || name.startsWith('+'))) {
-            name = name.substring(1);
+        let name = token;
+        let hasPrefix = false;
+        if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
+            name = token.substring(1);
             hasPrefix = true;
+        }
+        
+        if (name.length === 0) {
+            console.log(`Skipping empty name`);
+            i++;
+            continue;
+        }
+        
+        if (name === '-' || name === '@' || name === '+') {
+            console.log(`Skipping separator token: "${name}"`);
+            i++;
+            continue;
+        }
+        
+        console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
+        
+        const isRivalName = rivalNames.includes(name);
+        if (isRivalName) {
+            console.log(`🎯 Exact rival match found: "${name}"`);
         }
         
         i++;
         
-        if (i < tokens.length && !isNaN(tokens[i])) {
+        if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
             const id = tokens[i];
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
-            if (rivalNames.includes(name)) {
-                detectedRivals.push(name);
-                console.log(`Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+            
+            if (isRivalName) {
+                detectedRivals.push({ name, id });
+                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+                
+                if (config.standOnEnemy) {
+                    let coordinate = null;
+                    for (let j = i + 1; j < tokens.length; j++) {
+                        if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
+                            coordinate = tokens[j + 5];
+                            console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
+                            break;
+                        }
+                    }
+                    if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                        connection.send(`REMOVE ${coordinate}`);
+                    }
+                }
             }
             i++;
-        } else if (hasPrefix) {
-            i--;
         }
     }
     
-    if (detectedRivals.length > 0) {
-        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.join(', ')} - Defence mode activated`);
+    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
         handleRivals(detectedRivals, 'defence', connection);
-    } else {
-        console.log(`No rivals detected in 353 [${connection.botId}], continuing to monitor`);
     }
-    
-    return detectedRivals.length > 0;
 }
 
 function handleJoinCommand(parts, connection) {
     if (parts.length >= 4) {
-        let prefix = "";
-        let name = "";
-        let id = "";
-        
-        if (parts.length >= 5 && !isNaN(parts[3])) {
-            prefix = parts[1];
-            name = parts[2];
-            id = parts[3];
-        } else {
-            name = parts[1];
-            id = parts[2];
-        }
-        
+        let name = parts.length >= 5 && !isNaN(parts[3]) ? parts[2] : parts[1];
+        let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
         userMap[name] = id;
         console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
-        
         if (rivalNames.includes(name)) {
             console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
-            handleRivals([name], 'attack', connection);
+            
+            let coordinate = null;
+            if (config.standOnEnemy) {
+                for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
+                    if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
+                        coordinate = parts[i + 5];
+                        console.log(`Found coordinate ${coordinate} for rival ${name} in JOIN message`);
+                        break;
+                    }
+                }
+                if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                    console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                    connection.send(`REMOVE ${coordinate}`);
+                }
+            }
+            
+            handleRivals([{ name, id }], 'attack', connection);
         }
     }
 }
@@ -810,7 +1236,6 @@ async function performJailFreeFast(connection) {
     const userID = connection.botId;
     const password = connection.password;
     const boundary = '----WebKitFormBoundarylRahhWQJyn2QX0gB';
-    
     const formData = [
         `--${boundary}`,
         'Content-Disposition: form-data; name="a"',
@@ -833,7 +1258,6 @@ async function performJailFreeFast(connection) {
     
     const url = `https://galaxy.mobstudio.ru/services/?&userID=${userID}&password=${password}&query_rand=${Math.random()}`;
     const parsedUrl = new URL(url);
-    
     const options = {
         hostname: parsedUrl.hostname,
         port: 443,
@@ -868,16 +1292,11 @@ async function performJailFreeFast(connection) {
     return new Promise((resolve, reject) => {
         const req = https.request(options, (res) => {
             let data = '';
-            
-            res.on('data', (chunk) => {
-                data += chunk;
-            });
-            
+            res.on('data', (chunk) => data += chunk);
             res.on('end', () => {
                 console.log(`Jail free response for ${userID}:`, data);
                 resolve(data);
             });
-            
             res.on('error', (error) => {
                 console.error(`Response error for ${userID}:`, error);
                 reject(error);
@@ -888,44 +1307,31 @@ async function performJailFreeFast(connection) {
             console.error(`Request error performing jail_free for ${userID}:`, error.message);
             reject(error);
         });
-        
         req.on('timeout', () => {
             console.error(`Request timeout for ${userID}`);
             req.destroy();
             reject(new Error('Request timeout'));
         });
-        
-        // Set a timeout for the request
-        req.setTimeout(10000);
-        
-        // Write the form data to the request body
+        req.setTimeout(3000);
         req.write(formData);
         req.end();
     });
 }
 
-
-
-
-async function performJailFreeWithRetry(connection, maxRetries = 3, retryDelay = 1000) {
+async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay = 500) {
     const userID = connection.botId;
-    const password = connection.password;
-    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             console.log(`Jail free attempt ${attempt}/${maxRetries} for ${userID}`);
             console.time(`jailFreeAttempt${attempt}`);
-            
             const result = await performJailFreeFast(connection);
             console.timeEnd(`jailFreeAttempt${attempt}`);
             console.log(`✅ Jail free succeeded on attempt ${attempt} for ${userID}`);
             return result;
-            
         } catch (error) {
             console.error(`❌ Jail free attempt ${attempt}/${maxRetries} failed for ${userID}:`, error.message);
-            
             if (attempt < maxRetries) {
-                const delay = retryDelay * attempt; // Exponential backoff
+                const delay = retryDelay * attempt;
                 console.log(`⏳ Retrying jail free in ${delay}ms...`);
                 await new Promise(resolve => setTimeout(resolve, delay));
             } else {
@@ -935,174 +1341,6 @@ async function performJailFreeWithRetry(connection, maxRetries = 3, retryDelay =
         }
     }
 }
-async function warmConnectionPool() {
-    if (poolWarmupInProgress) {
-        console.log(`Pool warmup skipped: already in progress`);
-        return;
-    }
-    
-    try {
-        poolWarmupInProgress = true;
-        console.log(`Warming connection pool (current size: ${connectionPool.length}/${MAX_POOL_SIZE})`);
-        
-        const now = Date.now();
-        const STALE_THRESHOLD = 5 * 60 * 1000;
-        for (let i = connectionPool.length - 1; i >= 0; i--) {
-            const conn = connectionPool[i];
-            if (now - conn.lastUsed > STALE_THRESHOLD || 
-                (conn.state !== CONNECTION_STATES.HASH_RECEIVED && conn.state !== CONNECTION_STATES.READY)) {
-                console.log(`Pruning connection ${conn.botId || 'none'} from pool (State: ${conn.state}, Age: ${(now - conn.createdAt)/1000}s)`);
-                conn.cleanup();
-                connectionPool.splice(i, 1);
-            }
-        }
-        
-        const connectionsToAdd = Math.max(0, MAX_POOL_SIZE - connectionPool.length);
-        if (connectionsToAdd > 0) {
-            console.log(`Adding ${connectionsToAdd} new warm connection(s) to pool`);
-            const batchSize = 5;
-            for (let batch = 0; batch < Math.ceil(connectionsToAdd / batchSize); batch++) {
-                const batchPromises = [];
-                const batchStart = batch * batchSize;
-                const batchEnd = Math.min((batch + 1) * batchSize, connectionsToAdd);
-                for (let i = batchStart; i < batchEnd; i++) {
-                    const conn = createConnection();
-                    batchPromises.push((async () => {
-                        try {
-                            console.log(`Initializing pool connection ${i+1}/${connectionsToAdd} (warm mode)`);
-                            await conn.initialize(true);
-                            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
-                                connectionPool.push(conn);
-                                console.log(`Added new warm connection to pool (total: ${connectionPool.length}/${MAX_POOL_SIZE})`);
-                                return true;
-                            } else {
-                                console.warn(`Connection reached end of initialization but state is ${conn.state}, not adding to pool`);
-                                conn.cleanup();
-                                return false;
-                            }
-                        } catch (error) {
-                            console.error(`Failed to initialize connection for pool:`, error.message || error);
-                            conn.cleanup();
-                            return false;
-                        }
-                    })());
-                }
-                await Promise.allSettled(batchPromises);
-            }
-        }
-        console.log(`Connection pool warm-up complete. Pool size: ${connectionPool.length}/${MAX_POOL_SIZE}`);
-    } catch (err) {
-        console.error("Error in warmConnectionPool:", err);
-    } finally {
-        poolWarmupInProgress = false;
-    }
-}
-
-Promise.all([
-    warmConnectionPool().catch(err => console.error("Regular pool init failed:", err)),
-    warmPrisonConnectionPool().catch(err => console.error("Prison pool init failed:", err))
-]).then(() => {
-    console.log("🚀 Both connection pools initialized successfully");
-});
-
-async function getConnection(activateFromPool = true) {
-    console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
-    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY) {
-        console.log(`Reusing existing active connection ${activeConnection.botId}`);
-        return activeConnection;
-    }
-    
-    const warmConnections = connectionPool.filter(conn => 
-        conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData);
-    console.log(`Warm connections available: ${warmConnections.length}/${connectionPool.length}`);
-    
-    let chosenConn = null;
-    if (activateFromPool && warmConnections.length > 0) {
-        let oldestIdx = -1;
-        let oldestTime = Date.now();
-        for (let i = 0; i < connectionPool.length; i++) {
-            const conn = connectionPool[i];
-            if (conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData) {
-                if (conn.createdAt < oldestTime) {
-                    oldestTime = conn.createdAt;
-                    oldestIdx = i;
-                }
-            }
-        }
-        if (oldestIdx !== -1) {
-            chosenConn = connectionPool[oldestIdx];
-            connectionPool.splice(oldestIdx, 1);
-            console.log(`⚡ Using warm connection from pool (pool size now: ${connectionPool.length}/${MAX_POOL_SIZE})`);
-            try {
-                console.time('warmActivation');
-                await chosenConn.activateWarmConnection();
-                console.timeEnd('warmActivation');
-                activeConnection = chosenConn;
-                Promise.resolve().then(() => {
-                    warmConnectionPool().catch(err => {
-                        console.error("Error warming connection pool after using connection:", err);
-                    });
-                });
-                return chosenConn;
-            } catch (error) {
-                console.error("Failed to activate warm connection:", error.message || error);
-                chosenConn.cleanup();
-            }
-        } else {
-            console.log("No suitable warm connections in pool");
-        }
-    } else if (!activateFromPool) {
-        console.log("Not using pool for this connection (monitoring mode)");
-    }
-    
-    console.log("Creating new active connection");
-    const newConn = createConnection();
-    try {
-        await newConn.initialize(false);
-        activeConnection = newConn;
-        return newConn;
-    } catch (error) {
-        console.error("Failed to create new connection:", error.message || error);
-        Promise.resolve().then(() => {
-            warmConnectionPool().catch(err => {
-                console.error("Error warming connection pool after connection failure:", err);
-            });
-        });
-        throw error;
-    }
-}
-
-async function getMonitoringConnection() {
-    return getConnection(false);
-}
-
-async function tryReconnectWithBackoff() {
-    reconnectAttempt++;
-    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 3000);
-    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
-    return new Promise((resolve, reject) => {
-        setTimeout(async () => {
-            try {
-                const conn = await getConnection(true);
-                resolve(conn);
-            } catch (error) {
-                console.error(`Reconnect attempt ${reconnectAttempt} failed:`, error.message || error);
-                if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
-                    try {
-                        const conn = await tryReconnectWithBackoff();
-                        resolve(conn);
-                    } catch (err) {
-                        reject(err);
-                    }
-                } else {
-                    console.error(`Giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
-                    reconnectAttempt = 0;
-                    reject(new Error("Maximum reconnection attempts reached"));
-                }
-            }
-        }, backoffTime);
-    });
-}
 
 async function handleRivals(rivals, mode, connection) {
     if (!connection.botId || rivals.length === 0) {
@@ -1111,46 +1349,78 @@ async function handleRivals(rivals, mode, connection) {
     }
     
     currentMode = mode;
-    const waitTime = mode === 'attack' ? currentAttackTime : currentDefenceTime;
-    console.log(`Handling rivals in ${mode} mode with wait time: ${waitTime}ms [${connection.botId}]`);
+    const waitTime = getCurrentTiming(mode, connection);
+    console.log(`Handling rivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
+    console.log(`Timing state for ${connection.botId} - Attack: ${connection.attackTimingState.currentTime}ms (errors: ${connection.attackTimingState.consecutiveErrors}), Defense: ${connection.defenseTimingState.currentTime}ms (errors: ${connection.defenseTimingState.consecutiveErrors})`);
     
     monitoringMode = false;
     
-    for (const rival of rivals) {
-        const id = userMap[rival];
-        if (id) {
+    const ACTION_DELAY = 300; // Minimum delay between actions in ms
+    // Select only one detected rival
+    const targetRival = rivals[0];
+    
+    if (!targetRival) {
+        console.log(`No target rival selected, skipping actions.`);
+        return;
+    }
+
+    const id = userMap[targetRival.name];
+    if (id) {
+        if (config.actionOnEnemy && connection.lastActionCommand) {
+            const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${rival} (ID: ${id}) [${connection.botId}]`);
+                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
+                    connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
+                    setTimeout(() => {
+                        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
+                        connection.send(`ACTION 3 ${id}`);
+                        resolve();
+                    }, ACTION_DELAY);
+                }, firstActionTime);
+            });
+        } else {
+            // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
-            console.log(`Actions sent to ${rival} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
         }
+    } else {
+        console.log(`Could not find ID for target rival ${targetRival.name}, skipping actions.`);
+        return; // Added return here to prevent further execution if no ID
     }
     
+    // Introduce a very short delay to allow for immediate server responses (like 850 errors)
+    console.log(`Waiting briefly for server response after action (nano-second check)...`);
+    await new Promise(resolve => setTimeout(resolve, 10)); // 10ms delay, effectively yielding to event loop
+
+    // Check if the connection was already handled by an 850 error (i.e., it's no longer activeConnection)
+    // If activeConnection is null or different, it means the 850 handler already took over and cleaned up/reconnected.
+    if (!activeConnection || activeConnection !== connection) {
+        console.log(`Connection already handled by 850 error or other cleanup, skipping handleRivals cleanup.`);
+        return; // Exit handleRivals, as 850 handler has taken over
+    }
+
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
-    connection.cleanup();
-    if (activeConnection === connection) {
-        activeConnection = null;
-    }
-    
+    await connection.cleanup(true);
+    if (activeConnection === connection) activeConnection = null;
     monitoringMode = true;
     
-    console.log("⚡ Actions completed, immediately activating new connection");
-    Promise.resolve().then(async () => {
-        try {
-            console.time('reconnectAfterAction');
-            await getConnection(true);
-            console.timeEnd('reconnectAfterAction');
-        } catch (error) {
-            console.error("Failed to get new connection after rival handling:", error.message || error);
-            tryReconnectWithBackoff().catch(retryError => {
-                console.error("All reconnection attempts failed:", retryError.message || retryError);
-            });
-        }
-    });
+    console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
+    try {
+        console.time('reconnectAfterAction');
+        await new Promise(resolve => setTimeout(resolve, 500)); // Re-introduce 250ms delay
+        await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
+        console.timeEnd('reconnectAfterAction');
+    } catch (error) {
+        console.error("Failed to get new connection after rival handling:", error.message || error);
+        await tryReconnectWithBackoff().catch(retryError => console.error("All reconnection attempts failed:", retryError.message || retryError));
+    }
+    // Timing increment will now be handled by the 850 error message if applicable, or by the new connection's initialization.
 }
 
 async function handlePrisonAutomation(connection) {
@@ -1162,129 +1432,155 @@ async function handlePrisonAutomation(connection) {
     try {
         connection.prisonState = 'JOINING_PRISON_CHANNEL';
         console.log(`🔒 Starting prison automation for connection ${connection.botId}`);
-        
-        // First, try to join the prison channel
         console.log(`🔒 Joining prison channel for ${connection.botId}...`);
-        connection.send(`JOIN`); // Adjust channel name as needed
+        connection.send(`JOIN`);
         
-        // Wait a moment for the join to complete, then send ACTION 29
-            if (connection.prisonState === 'JOINING_PRISON_CHANNEL') {
-                console.log(`🔒 Sending ACTION 29 for ${connection.botId}...`);
-                connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
-                connection.send(`ACTION 29 ${connection.botId}`);
-                
-                connection.prisonTimeout = setTimeout(() => {
-                    console.log(`Prison automation timed out for connection ${connection.botId}`);
-                    connection.prisonState = 'IDLE';
-                    connection.prisonTimeout = null;
-                }, 3000); // Increased timeout
-            }
-        
+        if (connection.prisonState === 'JOINING_PRISON_CHANNEL') {
+            console.log(`🔒 Sending ACTION 29 for ${connection.botId}...`);
+            connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
+            connection.send(`ACTION 29 ${connection.botId}`);
+            connection.prisonTimeout = setTimeout(() => {
+                console.log(`Prison automation timed out for connection ${connection.botId}`);
+                connection.prisonState = 'IDLE';
+                connection.prisonTimeout = null;
+            }, 3000);
+        }
     } catch (error) {
         console.error(`Error during prison automation for connection ${connection.botId}:`, error);
         connection.prisonState = 'IDLE';
-        if (connection.prisonTimeout) {
-            clearTimeout(connection.prisonTimeout);
-            connection.prisonTimeout = null;
-        }
+        if (connection.prisonTimeout) clearTimeout(connection.prisonTimeout);
     }
 }
 
-
-
-warmConnectionPool().catch(err => {
-    console.error("Error during initial connection pool warm-up:", err);
-});
+Promise.all([
+    optimizedConnectionPoolMaintenance().catch(err => console.error("Initial pool setup failed:", err)),
+    optimizedPrisonPoolMaintenance().catch(err => console.error("Initial prison pool setup failed:", err))
+]).then(() => console.log("🚀 Optimized connection pools initialized"));
 
 setInterval(() => {
-    if (!poolWarmupInProgress) {
-        warmConnectionPool().catch(err => {
-            console.error("Error warming connection pool:", err);
-        });
+    if (!poolMaintenanceInProgress && !prisonMaintenanceInProgress) {
+        const healthyRegular = connectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
+        const healthyPrison = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
+        if (healthyRegular < POOL_MIN_SIZE) optimizedConnectionPoolMaintenance().catch(err => console.error("Scheduled pool maintenance error:", err));
+        if (healthyPrison < PRISON_POOL_MIN_SIZE) optimizedPrisonPoolMaintenance().catch(err => console.error("Scheduled prison pool maintenance error:", err));
     }
-}, 20000);
+}, POOL_HEALTH_CHECK_INTERVAL);
 
-async function recoverUser(password) {
-    console.log("Starting recovery with code:", password);
-    await warmConnectionPool().catch(err => {
-        console.error("Initial pool warm-up failed:", err.message || err);
-    });
+setInterval(() => {
+    const healthyRegular = connectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
+    const healthyPrison = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
+    console.log(`📊 Optimized Pool Status - Regular: ${healthyRegular}/${connectionPool.length} (target: ${POOL_TARGET_SIZE}), Prison: ${healthyPrison}/${prisonConnectionPool.length} (target: ${PRISON_POOL_TARGET_SIZE})`);
+}, 30000);
+
+// Removed global timing state logging as it's now per-connection
+
+async function recoverUser() {
+    console.log("Starting recovery with alternating RCs");
     try {
+        await optimizedConnectionPoolMaintenance();
         await getMonitoringConnection();
         console.log("Initial monitoring connection established successfully");
     } catch (error) {
         console.error("Failed to establish initial monitoring connection:", error.message || error);
-        setTimeout(() => {
-            recoverUser(password);
-        }, 1000);
+        setTimeout(recoverUser, 500);
     }
 }
 
 async function maintainMonitoringConnection() {
-    if (monitoringMode && (!activeConnection || activeConnection.state !== CONNECTION_STATES.READY)) {
+    if (monitoringMode && (!activeConnection || !activeConnection.state === CONNECTION_STATES.READY)) {
         console.log("Maintaining monitoring connection...");
         try {
             await getMonitoringConnection();
         } catch (error) {
             console.error("Failed to maintain monitoring connection:", error.message || error);
-            setTimeout(() => {
-                maintainMonitoringConnection();
-            }, 5000);
+            setTimeout(maintainMonitoringConnection, 1000);
         }
     }
 }
 
-setInterval(() => {
-    maintainMonitoringConnection();
-}, 30000);
+setInterval(maintainMonitoringConnection, 10000);
 
-recoverUser(recoveryCode);
+recoverUser();
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     console.log("Shutting down...");
-    connectionPool.forEach(conn => {
-        conn.cleanup();
-    });
-    if (activeConnection) {
-        activeConnection.cleanup();
-    }
+    await Promise.allSettled(connectionPool.map(conn => conn.cleanup(true)));
+    if (activeConnection) await Promise.resolve(activeConnection.cleanup(true));
     process.exit(0);
 });
 
-process.on('uncaughtException', (error) => {
+process.on('uncaughtException', async (error) => {
     console.error('Uncaught exception:', error.message || error);
     if (activeConnection) {
-        activeConnection.cleanup();
+        await activeConnection.cleanup();
         activeConnection = null;
     }
     setTimeout(() => {
-        if (monitoringMode) {
-            getMonitoringConnection().catch(err => {
-                console.error("Failed to get new monitoring connection after uncaught exception:", err.message || err);
-            });
-        } else {
-            getConnection(true).catch(err => {
-                console.error("Failed to get new connection after uncaught exception:", err.message || err);
-            });
-        }
-    }, 1000);
+        if (monitoringMode) getMonitoringConnection().catch(err => console.error("Failed to get new monitoring connection after error:", err.message || err));
+        else getConnection(true).catch(err => console.error("Failed to get new connection after error:", err.message || err));
+    }, 500);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', async (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
     if (activeConnection) {
-        activeConnection.cleanup();
+        await activeConnection.cleanup();
         activeConnection = null;
     }
     setTimeout(() => {
-        if (monitoringMode) {
-            getMonitoringConnection().catch(err => {
-                console.error("Failed to get new monitoring connection after unhandled rejection:", err.message || err);
-            });
-        } else {
-            getConnection(true).catch(err => {
-                console.error("Failed to get new connection after unhandled rejection:", err.message || err);
-            });
-        }
-    }, 1000);
+        if (monitoringMode) getMonitoringConnection().catch(err => console.error("Failed to get new monitoring connection after error:", err.message || err));
+        else getConnection(true).catch(err => console.error("Failed to get new connection after error:", err.message || err));
+    }, 500);
 });
+
+async function getMistralChatResponse(prompt) {
+    const url = 'https://api.mistral.ai/v1/chat/completions';
+    const headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        'Authorization': `Bearer ${MISTRAL_API_KEY}`
+    };
+    const data = JSON.stringify({
+        "model": "open-mistral-7b",
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 20,
+        "temperature": 0.2,
+        "top_p": 1,
+        "random_seed": 42,
+        "stream": false
+    });
+
+    return new Promise((resolve, reject) => {
+        const req = https.request(url, {
+            method: 'POST',
+            headers: headers
+        }, (res) => {
+            let responseBody = '';
+            res.on('data', (chunk) => {
+                responseBody += chunk;
+            });
+            res.on('end', () => {
+                try {
+                    const jsonResponse = JSON.parse(responseBody);
+                    if (jsonResponse.choices && jsonResponse.choices.length > 0) {
+                        resolve(jsonResponse.choices[0].message.content);
+                    } else {
+                        reject(new Error('No response from Mistral AI'));
+                    }
+                } catch (e) {
+                    reject(new Error(`Failed to parse Mistral AI response: ${e.message}`));
+                }
+            });
+        });
+
+        req.on('error', (e) => {
+            reject(new Error(`Mistral AI request failed: ${e.message}`));
+        });
+
+        req.write(data);
+        req.end();
+    });
+}
+// Removed global debugTimingStates as it's now per-connection
