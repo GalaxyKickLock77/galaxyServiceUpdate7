@@ -448,11 +448,11 @@ async function getPrisonConnection() {
     return getConnection(true);
 }
 
-async function getConnection(activateFromPool = true) {
+async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
     const now = Date.now();
-    if (now - lastCloseTime < 500) {
+    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
         const waitTime = 1000 - (now - lastCloseTime);
-        console.log(`Waiting ${waitTime}ms before attempting to get new connection`);
+        console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
@@ -966,7 +966,7 @@ function createConnection() {
                                 console.log(`850 error but no active mode, current mode: ${currentMode}`);
                             }
                             // Trigger reconnection after handling the 850 error
-                            //Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
+                            Promise.resolve().then(() => getConnection(true, true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
                             return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
                             console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
@@ -1413,8 +1413,7 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
         console.time('reconnectAfterAction');
-        await new Promise(resolve => setTimeout(resolve, 250));
-        await getConnection(true);
+        await getConnection(true, true); // Pass true to skip lastCloseTime check
         console.timeEnd('reconnectAfterAction');
     } catch (error) {
         console.error("Failed to get new connection after rival handling:", error.message || error);
