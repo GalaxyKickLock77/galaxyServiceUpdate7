@@ -880,7 +880,7 @@ function createConnection() {
                                     console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
                                     
                                     console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-                                    this.send("QUIT");
+                                    this.send("QUIT :ds");
                                     this.prisonState = 'IDLE';
                                     
                                     console.log(`⚡ Waiting for connection ${this.botId} to close before relogin`);
@@ -952,7 +952,7 @@ function createConnection() {
                     case "850":
                         if (payload.includes("3 секунд(ы)")) {
                             console.log(`⚡ 850 error with 3-second rule detected. Immediate QUIT and re-evaluation.`);
-                            this.send("QUIT");
+                            this.send("QUIT :ds");
                             await this.cleanup(); // Ensure connection is fully closed
                             if (activeConnection === this) {
                                 activeConnection = null;
