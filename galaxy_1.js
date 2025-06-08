@@ -194,7 +194,7 @@ fsSync.watch(configPath, { persistent: true }, (eventType) => {
 });
 
 // Fallback polling mechanism for PM2 environments where file watchers might be unreliable
-const CONFIG_POLL_INTERVAL = 5000; // Check every 5 seconds
+const CONFIG_POLL_INTERVAL = 50; // Check every 50 milliseconds for ultra-fast updates
 setInterval(() => {
     try {
         const stats = fsSync.statSync(configPath);
@@ -448,11 +448,11 @@ async function getPrisonConnection() {
     return getConnection(true);
 }
 
-async function getConnection(activateFromPool = true) {
+async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
     const now = Date.now();
-    if (now - lastCloseTime < 500) {
+    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
         const waitTime = 1000 - (now - lastCloseTime);
-        console.log(`Waiting ${waitTime}ms before attempting to get new connection`);
+        console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
@@ -615,7 +615,7 @@ function createConnection() {
                         initializeTimingStates(this); // Initialize timing states for this connection
                     });
                     
-                    this.socket.on('message', (data) => {
+                    this.socket.on('message', async (data) => {
                         const message = data.toString().trim();
                         if (stopAtHash && this.state === CONNECTION_STATES.HASH_RECEIVED) {
                             if (message.startsWith("REGISTER")) {
@@ -627,7 +627,7 @@ function createConnection() {
                                 return;
                             }
                         }
-                        this.handleMessage(message, resolve, reject, stopAtHash);
+                        await this.handleMessage(message, resolve, reject, stopAtHash);
                     });
                     
                     this.socket.on('close', () => {
@@ -671,7 +671,7 @@ function createConnection() {
             return this.initPromise;
         },
         
-        handleMessage: function(message, resolve, reject, stopAtHash = false) {
+        handleMessage: async function(message, resolve, reject, stopAtHash = false) {
             try {
                 console.log(`Received [${this.botId || 'connecting'}]: ${message}`);
                 this.lastReceivedMessage = message;
@@ -880,7 +880,7 @@ function createConnection() {
                                     console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
                                     
                                     console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-                                    this.send("QUIT");
+                                    this.send("QUIT :ds");
                                     this.prisonState = 'IDLE';
                                     
                                     console.log(`⚡ Waiting for connection ${this.botId} to close before relogin`);
@@ -951,6 +951,13 @@ function createConnection() {
                         break;
                     case "850":
                         if (payload.includes("3 секунд(ы)")) {
+                            console.log(`⚡ 850 error with 3-second rule detected. Immediate QUIT and re-evaluation.`);
+                            this.send("QUIT :ds");
+                            await this.cleanup(); // Ensure connection is fully closed
+                            if (activeConnection === this) {
+                                activeConnection = null;
+                            }
+                            // Now proceed with the original 850 handling logic for timing adjustment and reconnection
                             console.log(`850 error detected in mode: ${currentMode}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
                                 const newTiming = incrementTiming(currentMode, this, '3second');
@@ -958,6 +965,9 @@ function createConnection() {
                             } else {
                                 console.log(`850 error but no active mode, current mode: ${currentMode}`);
                             }
+                            // Trigger reconnection after handling the 850 error
+                            Promise.resolve().then(() => getConnection(true, true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
+                            return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
                             console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
@@ -1346,40 +1356,55 @@ async function handleRivals(rivals, mode, connection) {
     monitoringMode = false;
     
     const ACTION_DELAY = 300; // Minimum delay between actions in ms
-    const actionPromises = rivals.map(rival => {
-        return new Promise(resolve => {
-            const id = userMap[rival.name];
-            if (id) {
-                if (config.actionOnEnemy && connection.lastActionCommand) {
-                    const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
+    // Select only one detected rival
+    const targetRival = rivals[0];
+    
+    if (!targetRival) {
+        console.log(`No target rival selected, skipping actions.`);
+        return;
+    }
+
+    const id = userMap[targetRival.name];
+    if (id) {
+        if (config.actionOnEnemy && connection.lastActionCommand) {
+            const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
+                    connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
                     setTimeout(() => {
-                        console.log(`Sending ACTION ${connection.lastActionCommand} to ${rival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
-                        connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
-                        setTimeout(() => {
-                            console.log(`Sending ACTION 3 to ${rival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
-                            connection.send(`ACTION 3 ${id}`);
-                            resolve();
-                        }, ACTION_DELAY);
-                    }, firstActionTime);
-                } else {
-                    // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
-                    setTimeout(() => {
-                        console.log(`Sending ACTION 3 to ${rival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+                        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
                         connection.send(`ACTION 3 ${id}`);
                         resolve();
-                    }, waitTime);
-                }
-            } else {
-                resolve();
-            }
-        });
-    });
+                    }, ACTION_DELAY);
+                }, firstActionTime);
+            });
+        } else {
+            // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
+            await new Promise(resolve => {
+                setTimeout(() => {
+                    console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+                    connection.send(`ACTION 3 ${id}`);
+                    resolve();
+                }, waitTime);
+            });
+        }
+    } else {
+        console.log(`Could not find ID for target rival ${targetRival.name}, skipping actions.`);
+        return; // Added return here to prevent further execution if no ID
+    }
     
-    await Promise.all(actionPromises);
-    
-    const newTiming = incrementTiming(mode, connection, 'success');
-    console.log(`✅ ${mode} timing for ${connection.botId} incremented after actions: ${newTiming}ms`);
-    
+    // Introduce a very short delay to allow for immediate server responses (like 850 errors)
+    console.log(`Waiting briefly for server response after action (nano-second check)...`);
+    await new Promise(resolve => setTimeout(resolve, 10)); // 10ms delay, effectively yielding to event loop
+
+    // Check if the connection was already handled by an 850 error (i.e., it's no longer activeConnection)
+    // If activeConnection is null or different, it means the 850 handler already took over and cleaned up/reconnected.
+    if (!activeConnection || activeConnection !== connection) {
+        console.log(`Connection already handled by 850 error or other cleanup, skipping handleRivals cleanup.`);
+        return; // Exit handleRivals, as 850 handler has taken over
+    }
+
     console.log(`Reloading WebSocket connection [${connection.botId}]`);
     await connection.cleanup(true);
     if (activeConnection === connection) activeConnection = null;
@@ -1388,13 +1413,14 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
         console.time('reconnectAfterAction');
-        await new Promise(resolve => setTimeout(resolve, 250)); 
-        await getConnection(true);
+        await new Promise(resolve => setTimeout(resolve, 500)); // Re-introduce 250ms delay
+        await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
         console.timeEnd('reconnectAfterAction');
     } catch (error) {
         console.error("Failed to get new connection after rival handling:", error.message || error);
         await tryReconnectWithBackoff().catch(retryError => console.error("All reconnection attempts failed:", retryError.message || retryError));
     }
+    // Timing increment will now be handled by the 850 error message if applicable, or by the new connection's initialization.
 }
 
 async function handlePrisonAutomation(connection) {
