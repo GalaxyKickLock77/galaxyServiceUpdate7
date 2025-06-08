@@ -966,7 +966,7 @@ function createConnection() {
                                 console.log(`850 error but no active mode, current mode: ${currentMode}`);
                             }
                             // Trigger reconnection after handling the 850 error
-                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
+                            //Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
                             return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
                             console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
