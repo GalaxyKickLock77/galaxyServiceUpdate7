@@ -1413,7 +1413,8 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
         console.time('reconnectAfterAction');
-        await getConnection(true, true); // Pass true to skip lastCloseTime check
+        await new Promise(resolve => setTimeout(resolve, 500)); // Re-introduce 250ms delay
+        await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
         console.timeEnd('reconnectAfterAction');
     } catch (error) {
         console.error("Failed to get new connection after rival handling:", error.message || error);
