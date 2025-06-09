@@ -1029,7 +1029,7 @@ function createConnection() {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 1000);
+                    }, 10000);
     
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
