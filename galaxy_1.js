@@ -77,7 +77,9 @@ let monitoringMode = true;
 let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
 
 function getNextRC() {
-    lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
+    if (config.RC_rotation_toggle) {
+        lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
+    }
     return lastUsedRC;
 }
 
@@ -135,6 +137,7 @@ function updateConfigValues() {
             config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
+            config.RC_rotation_toggle = config.RC_rotation_toggle === "true" || config.RC_rotation_toggle === true;
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
