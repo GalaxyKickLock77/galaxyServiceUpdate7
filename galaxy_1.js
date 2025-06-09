@@ -8,8 +8,8 @@ const { SocksProxyAgent } = require('socks-proxy-agent');
 const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
-// Create SOCKS5 proxy agent
-const proxyAgent = new SocksProxyAgent('socks5://p.webshare.io:9999');
+// Create SOCKS5 proxy agent with authentication
+const proxyAgent = new SocksProxyAgent('socks5://czwgcxac-rotate:8loze1odatlg@p.webshare.io:80');
 
 // Handle PM2 signals for config reload
 process.on('SIGUSR2', () => {
