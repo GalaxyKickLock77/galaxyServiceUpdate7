@@ -74,16 +74,10 @@ let currentDefenceTime;
 let monitoringMode = true;
 
 // Recovery code alternation
-let lastUsedRC = 'RC1'; // Start with RC1 for non-rotation
+let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
 
 function getNextRC() {
-    console.log(`[getNextRC] Before rotation: lastUsedRC = ${lastUsedRC}, RC_rotation_toggle = ${config.RC_rotation_toggle}`);
-    if (config.RC_rotation_toggle) {
-        lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
-        console.log(`[getNextRC] After rotation (toggle true): lastUsedRC = ${lastUsedRC}`);
-    } else {
-        console.log(`[getNextRC] No rotation (toggle false): lastUsedRC remains ${lastUsedRC}`);
-    }
+    lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
     return lastUsedRC;
 }
 
@@ -141,7 +135,6 @@ function updateConfigValues() {
             config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-            config.RC_rotation_toggle = config.RC_rotation_toggle === "true" || config.RC_rotation_toggle === true;
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
@@ -151,8 +144,7 @@ function updateConfigValues() {
                 rivalNames,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
-                aiChatToggle: config.aiChatToggle,
-                RC_rotation_toggle: config.RC_rotation_toggle // Add this to log the final boolean value
+                aiChatToggle: config.aiChatToggle
             });
             
             // Re-initialize timing states for all connections if needed
@@ -224,7 +216,6 @@ function genHash(code) {
     str = str.split("").reverse().join("0").substr(5, 10);
     return str;
 }
-
 
 function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
@@ -459,9 +450,8 @@ async function getPrisonConnection() {
 
 async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
     const now = Date.now();
-    // Increase cooldown to 10.5 seconds to respect server's 10-second rule
-    if (!skipCloseTimeCheck && now - lastCloseTime < 10500) {
-        const waitTime = 10500 - (now - lastCloseTime);
+    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
+        const waitTime = 1000 - (now - lastCloseTime);
         console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
@@ -616,7 +606,7 @@ function createConnection() {
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 12000); // Increased to 12 seconds
+                    }, 3000);
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
@@ -1031,7 +1021,7 @@ function createConnection() {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 12000); // Increased to 12 seconds
+                    }, 1000);
     
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
