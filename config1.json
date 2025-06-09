@@ -17,6 +17,5 @@
   "rival": [""],
   "standOnEnemy": "false",
   "actionOnEnemy": "false",
-  "RC_rotation_toggle": true,
   "aiChatToggle": "false"
 }
