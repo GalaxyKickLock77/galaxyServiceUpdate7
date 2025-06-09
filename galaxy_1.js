@@ -77,8 +77,12 @@ let monitoringMode = true;
 let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
 
 function getNextRC() {
+    console.log(`[getNextRC] Before rotation: lastUsedRC = ${lastUsedRC}, RC_rotation_toggle = ${config.RC_rotation_toggle}`);
     if (config.RC_rotation_toggle) {
         lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
+        console.log(`[getNextRC] After rotation (toggle true): lastUsedRC = ${lastUsedRC}`);
+    } else {
+        console.log(`[getNextRC] No rotation (toggle false): lastUsedRC remains ${lastUsedRC}`);
     }
     return lastUsedRC;
 }
@@ -147,7 +151,8 @@ function updateConfigValues() {
                 rivalNames,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
-                aiChatToggle: config.aiChatToggle
+                aiChatToggle: config.aiChatToggle,
+                RC_rotation_toggle: config.RC_rotation_toggle // Add this to log the final boolean value
             });
             
             // Re-initialize timing states for all connections if needed
@@ -218,6 +223,13 @@ function genHash(code) {
     let str = hash.toString(CryptoJS.enc.Hex);
     str = str.split("").reverse().join("0").substr(5, 10);
     return str;
+}
+
+// New function for calculating exponential backoff delay
+function calculateRetryDelay(attempt) {
+    // Based on user's request: 10ms, 20ms, 35ms, 55ms...
+    // Formula: 2.5 * attempt^2 + 2.5 * attempt + 5
+    return Math.round(2.5 * Math.pow(attempt, 2) + 2.5 * attempt + 5);
 }
 
 function incrementTiming(mode, connection, errorType = 'success') {
@@ -925,9 +937,12 @@ function createConnection() {
                         console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
                         if (this.authenticating && this.userCommandRetryCount < 10) {
                             this.userCommandRetryCount++;
-                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
+                            const delay = calculateRetryDelay(this.userCommandRetryCount);
+                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) with ${delay}ms delay [${this.botId}]`);
                             if (this.botId && this.password && this.nick && this.hash) {
-                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                                setTimeout(() => {
+                                    this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                                }, delay);
                             } else {
                                 console.error(`Cannot retry USER command: missing required data [${this.botId}]`);
                                 this.authenticating = false;
