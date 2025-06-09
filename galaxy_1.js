@@ -930,35 +930,18 @@ function createConnection() {
                         break;
                     case "452":
                         console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
-                        if (this.authenticating && this.userCommandRetryCount < 10) {
-                            this.userCommandRetryCount++;
-                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
-                            if (this.botId && this.password && this.nick && this.hash) {
-                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                            } else {
-                                console.error(`Cannot retry USER command: missing required data [${this.botId}]`);
-                                this.authenticating = false;
-                                clearTimeout(this.connectionTimeout);
-                                this.cleanup();
-                                reject(new Error(`Critical error 452 and missing data for retry`));
-                            }
-                        } else if (this.authenticating) {
-                            this.authenticating = false;
-                            clearTimeout(this.connectionTimeout);
-                            this.cleanup();
-                            const index = connectionPool.indexOf(this);
-                            if (index !== -1) connectionPool.splice(index, 1);
-                            if (this === activeConnection) {
-                                activeConnection = null;
-                            }
-                            console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying immediate recovery...`);
-                            reject(new Error(`Critical error 452 after retries`));
-                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
-                            return;
-                        } else {
-                            this.cleanup();
+                        this.authenticating = false;
+                        clearTimeout(this.connectionTimeout);
+                        this.cleanup();
+                        const index = connectionPool.indexOf(this);
+                        if (index !== -1) connectionPool.splice(index, 1);
+                        if (this === activeConnection) {
+                            activeConnection = null;
                         }
-                        break;
+                        console.log(`⚡ Got 452 error, closed connection, removed from pool, and trying immediate recovery...`);
+                        reject(new Error(`Critical error 452`));
+                        Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
+                        return;
                     case "850":
                         if (payload.includes("3 секунд(ы)")) {
                             console.log(`⚡ 850 error with 3-second rule detected. Immediate QUIT and re-evaluation.`);
@@ -1423,7 +1406,7 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
         console.time('reconnectAfterAction');
-        await new Promise(resolve => setTimeout(resolve, 500)); // Re-introduce 250ms delay
+        await new Promise(resolve => setTimeout(resolve, 500)); // Ensure minimum 500ms delay
         await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
         console.timeEnd('reconnectAfterAction');
     } catch (error) {
