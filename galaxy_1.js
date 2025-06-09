@@ -533,8 +533,12 @@ async function getMonitoringConnection() {
 
 async function tryReconnectWithBackoff() {
     reconnectAttempt++;
-    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 1000);
-    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
+    let backoffBase = RECONNECT_BACKOFF_BASE;
+    if (!config.RC_rotation_toggle) { // Apply higher delay for non-rotation
+        backoffBase = 1250; // Minimum 1250ms delay for non-rotation
+    }
+    const backoffTime = Math.min(backoffBase * Math.pow(1.5, reconnectAttempt - 1), 1000);
+    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff (RC rotation: ${config.RC_rotation_toggle ? 'enabled' : 'disabled'})...`);
     return new Promise((resolve, reject) => {
         setTimeout(async () => {
             try {
