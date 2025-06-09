@@ -607,14 +607,14 @@ function createConnection() {
                     this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
                         agent: proxyAgent,
                         rejectUnauthorized: false,
-                        handshakeTimeout: 1000
+                        handshakeTimeout: 5000
                     });
                     this.connectionTimeout = setTimeout(() => {
                         console.log("Connection initialization timeout");
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 3000);
+                    }, 10000);
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
