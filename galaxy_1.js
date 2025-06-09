@@ -74,7 +74,7 @@ let currentDefenceTime;
 let monitoringMode = true;
 
 // Recovery code alternation
-let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
+let lastUsedRC = 'RC1'; // Start with RC1 for non-rotation
 
 function getNextRC() {
     console.log(`[getNextRC] Before rotation: lastUsedRC = ${lastUsedRC}, RC_rotation_toggle = ${config.RC_rotation_toggle}`);
