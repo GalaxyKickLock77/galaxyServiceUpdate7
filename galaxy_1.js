@@ -225,12 +225,6 @@ function genHash(code) {
     return str;
 }
 
-// New function for calculating exponential backoff delay
-function calculateRetryDelay(attempt) {
-    // Based on user's request: 10ms, 20ms, 35ms, 55ms...
-    // Formula: 2.5 * attempt^2 + 2.5 * attempt + 5
-    return Math.round(2.5 * Math.pow(attempt, 2) + 2.5 * attempt + 5);
-}
 
 function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
@@ -465,8 +459,9 @@ async function getPrisonConnection() {
 
 async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
     const now = Date.now();
-    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
-        const waitTime = 1000 - (now - lastCloseTime);
+    // Increase cooldown to 10.5 seconds to respect server's 10-second rule
+    if (!skipCloseTimeCheck && now - lastCloseTime < 10500) {
+        const waitTime = 10500 - (now - lastCloseTime);
         console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
     }
@@ -621,7 +616,7 @@ function createConnection() {
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 3000);
+                    }, 12000); // Increased to 12 seconds
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
@@ -937,12 +932,9 @@ function createConnection() {
                         console.log(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
                         if (this.authenticating && this.userCommandRetryCount < 10) {
                             this.userCommandRetryCount++;
-                            const delay = calculateRetryDelay(this.userCommandRetryCount);
-                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) with ${delay}ms delay [${this.botId}]`);
+                            console.log(`Retrying USER command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
                             if (this.botId && this.password && this.nick && this.hash) {
-                                setTimeout(() => {
-                                    this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                                }, delay);
+                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
                             } else {
                                 console.error(`Cannot retry USER command: missing required data [${this.botId}]`);
                                 this.authenticating = false;
@@ -1039,7 +1031,7 @@ function createConnection() {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 1000);
+                    }, 12000); // Increased to 12 seconds
     
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
