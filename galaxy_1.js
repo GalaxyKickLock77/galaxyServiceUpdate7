@@ -4,8 +4,12 @@ const fsSync = require('fs');
 const CryptoJS = require('crypto-js');
 const path = require('path');
 const https = require('https');
+const { SocksProxyAgent } = require('socks-proxy-agent');
 const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
+
+// Create SOCKS5 proxy agent
+const proxyAgent = new SocksProxyAgent('socks5://p.webshare.io:9999');
 
 // Handle PM2 signals for config reload
 process.on('SIGUSR2', () => {
@@ -600,7 +604,11 @@ function createConnection() {
                     this.authenticating = true;
                     console.log(`Initializing new connection with ${this.rcKey}: ${this.recoveryCode} (stopAtHash: ${stopAtHash})...`);
                     
-                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", { rejectUnauthorized: false, handshakeTimeout: 1000 });
+                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", {
+                        agent: proxyAgent,
+                        rejectUnauthorized: false,
+                        handshakeTimeout: 1000
+                    });
                     this.connectionTimeout = setTimeout(() => {
                         console.log("Connection initialization timeout");
                         this.authenticating = false;
