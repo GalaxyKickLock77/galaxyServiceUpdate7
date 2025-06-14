@@ -34,29 +34,33 @@ let lastCloseTime = 0;
 let config;
 let rivalNames = [];
 let userMap = {};
-let reconnectAttempt = 0;
+let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
 let currentMode = null;
-
-// Connection pool settings
-const MAX_RECONNECT_ATTEMPTS = 5;
+let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
+ 
+ // Connection pool settings
+ const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
+const DUAL_RC_BACKOFF_BASE = 1500;
+const DUAL_RC_MAX_BACKOFF = 3500; // Updated based on user's request for even backoff of 2500
 const connectionPool = [];
 let activeConnection = null;
 
 // Prison pool settings
 const prisonConnectionPool = [];
 
-let attackTimingState = {
-    currentTime: null,
-    lastMode: null,
-    consecutiveErrors: 0
+let globalTimingState = {
+    RC1: {
+        attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 },
+        defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 }
+    },
+    RC2: {
+        attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 },
+        defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 }
+    }
 };
 
-let defenseTimingState = {
-    currentTime: null,
-    lastMode: null,
-    consecutiveErrors: 0
-};
+console.log("Initial globalTimingState:", JSON.stringify(globalTimingState));
 
 // Connection states
 const CONNECTION_STATES = {
@@ -77,23 +81,29 @@ let monitoringMode = true;
 let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
 
 function getNextRC() {
+    if (config.dualRCToggle === false) {
+        console.log("dualRCToggle is false, using only RC1 for reconnection.");
+        return 'RC1';
+    }
     lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
     return lastUsedRC;
 }
 
 function initializeTimingStates(connection) {
     const rcKey = connection.rcKey;
+    // Initialize connection's timing states from the global timing state for the specific RC
     connection.attackTimingState = {
-        currentTime: config[`${rcKey}_startAttackTime`],
-        lastMode: null,
-        consecutiveErrors: 0
+        currentTime: globalTimingState[rcKey].attack.currentTime,
+        lastMode: globalTimingState[rcKey].attack.lastMode,
+        consecutiveErrors: globalTimingState[rcKey].attack.consecutiveErrors
     };
     connection.defenseTimingState = {
-        currentTime: config[`${rcKey}_startDefenceTime`],
-        lastMode: null,
-        consecutiveErrors: 0
+        currentTime: globalTimingState[rcKey].defense.currentTime,
+        lastMode: globalTimingState[rcKey].defense.lastMode,
+        consecutiveErrors: globalTimingState[rcKey].defense.consecutiveErrors
     };
-    console.log(`Timing states initialized for ${connection.botId || 'new connection'} (${rcKey}):`, {
+    console.log(`Initializing connection ${connection.botId || 'new connection'} with rcKey: ${rcKey}. Global state for this RC:`, JSON.stringify(globalTimingState[rcKey]));
+    console.log(`Timing states initialized for ${connection.botId || 'new connection'} (${rcKey}) from global state:`, {
         attack: connection.attackTimingState.currentTime,
         defense: connection.defenseTimingState.currentTime
     });
@@ -135,6 +145,7 @@ function updateConfigValues() {
             config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
+            config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
@@ -144,10 +155,41 @@ function updateConfigValues() {
                 rivalNames,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
-                aiChatToggle: config.aiChatToggle
+                aiChatToggle: config.aiChatToggle,
+                dualRCToggle: config.dualRCToggle
             });
             
             // Re-initialize timing states for all connections if needed
+            // Initialize global timing states for each RC if they haven't been set or if config changes
+            if (globalTimingState.RC1.attack.currentTime === null) {
+                globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime;
+                globalTimingState.RC1.attack.lastMode = null;
+                globalTimingState.RC1.attack.consecutiveErrors = 0;
+            }
+            if (globalTimingState.RC1.defense.currentTime === null) {
+                globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime;
+                globalTimingState.RC1.defense.lastMode = null;
+                globalTimingState.RC1.defense.consecutiveErrors = 0;
+            }
+            if (globalTimingState.RC2.attack.currentTime === null) {
+                globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime;
+                globalTimingState.RC2.attack.lastMode = null;
+                globalTimingState.RC2.attack.consecutiveErrors = 0;
+            }
+            if (globalTimingState.RC2.defense.currentTime === null) {
+                globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime;
+                globalTimingState.RC2.defense.lastMode = null;
+                globalTimingState.RC2.defense.consecutiveErrors = 0;
+            }
+            console.log(`Global timing states initialized/updated from config:`, {
+                RC1_attack: globalTimingState.RC1.attack.currentTime,
+                RC1_defense: globalTimingState.RC1.defense.currentTime,
+                RC2_attack: globalTimingState.RC2.attack.currentTime,
+                RC2_defense: globalTimingState.RC2.defense.currentTime
+            });
+
+            // Re-initialize timing states for all connections if needed
+            // This should now pull from the global state based on their rcKey
             connectionPool.forEach(conn => {
                 initializeTimingStates(conn);
             });
@@ -155,6 +197,7 @@ function updateConfigValues() {
             if (activeConnection) {
                 initializeTimingStates(activeConnection);
             }
+            console.log(`Final globalTimingState after updateConfigValues:`, JSON.stringify(globalTimingState));
         } catch (error) {
             if (retries < maxRetries) {
                 retries++;
@@ -219,38 +262,46 @@ function genHash(code) {
 
 function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
-    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
     const rcKey = connection.rcKey;
+    const globalStateForRC = isAttack ? globalTimingState[rcKey].attack : globalTimingState[rcKey].defense;
     const configStart = isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`];
     const configStop = isAttack ? config[`${rcKey}_stopAttackTime`] : config[`${rcKey}_stopDefenceTime`];
     const configInterval = isAttack ? config[`${rcKey}_attackIntervalTime`] : config[`${rcKey}_defenceIntervalTime`];
-    
+
+    console.log(`Incrementing timing for ${mode} mode, rcKey: ${rcKey}. Current global state for this RC:`, JSON.stringify(globalTimingState[rcKey]));
+
     if (errorType !== 'success') {
-        timingState.consecutiveErrors++;
+        globalStateForRC.consecutiveErrors++;
     } else {
-        timingState.consecutiveErrors = 0;
+        globalStateForRC.consecutiveErrors = 0;
     }
-    
-    const oldTime = timingState.currentTime;
-    timingState.currentTime += configInterval;
-    
-    if (timingState.currentTime > configStop) {
-        timingState.currentTime = configStart;
-        timingState.consecutiveErrors = 0;
-        console.log(`${mode} timing for ${connection.botId} (${rcKey}) cycled back to start: ${timingState.currentTime}ms`);
+
+    const oldTime = globalStateForRC.currentTime;
+    globalStateForRC.currentTime += configInterval;
+
+    if (globalStateForRC.currentTime > configStop) {
+        globalStateForRC.currentTime = configStart;
+        globalStateForRC.consecutiveErrors = 0;
+        console.log(`${mode} global timing for ${connection.botId} (${rcKey}) cycled back to start: ${globalStateForRC.currentTime}ms`);
     } else {
-        console.log(`${mode} timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${timingState.currentTime}ms (errors: ${timingState.consecutiveErrors}, type: ${errorType})`);
+        console.log(`${mode} global timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${globalStateForRC.currentTime}ms (errors: ${globalStateForRC.consecutiveErrors}, type: ${errorType})`);
     }
-    
-    timingState.lastMode = mode;
-    return timingState.currentTime;
+
+    globalStateForRC.lastMode = mode;
+
+    // Update the connection's timing state to reflect the global state immediately
+    connection.attackTimingState.currentTime = globalTimingState[rcKey].attack.currentTime;
+    connection.defenseTimingState.currentTime = globalTimingState[rcKey].defense.currentTime;
+
+    return globalStateForRC.currentTime;
 }
 
 function getCurrentTiming(mode, connection) {
     const isAttack = mode === 'attack';
-    const timingState = isAttack ? connection.attackTimingState : connection.defenseTimingState;
     const rcKey = connection.rcKey;
-    return timingState.currentTime || (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
+    const globalStateForRC = isAttack ? globalTimingState[rcKey].attack : globalTimingState[rcKey].defense;
+    // It should always be initialized by updateConfigValues, but a fallback is good.
+    return globalStateForRC.currentTime !== null ? globalStateForRC.currentTime : (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
 }
 
 async function optimizedConnectionPoolMaintenance() {
@@ -432,7 +483,6 @@ async function getPrisonConnection() {
             try {
                 console.time('prisonWarmActivation');
                 await chosenConn.activateWarmConnection();
-                console.timeEnd('prisonWarmActivation');
                 activeConnection = chosenConn;
                 Promise.resolve().then(() => optimizedPrisonPoolMaintenance().catch(err => console.error("Error re-warming prison pool:", err)));
                 return chosenConn;
@@ -440,6 +490,8 @@ async function getPrisonConnection() {
                 console.error("Failed to activate PRISON connection:", error.message || error);
                 await chosenConn.cleanup();
                 throw error;
+            } finally {
+                console.timeEnd('prisonWarmActivation');
             }
         }
     }
@@ -449,110 +501,102 @@ async function getPrisonConnection() {
 }
 
 async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
-    const now = Date.now();
-    if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
-        const waitTime = 1000 - (now - lastCloseTime);
-        console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+    if (currentConnectionPromise) {
+        console.log("Connection attempt already in progress, returning existing promise.");
+        return currentConnectionPromise;
     }
-
-    console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
-    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && 
-        activeConnection.socket && activeConnection.socket.readyState === WebSocket.OPEN) {
-        console.log(`Reusing existing active connection ${activeConnection.botId}`);
-        activeConnection.lastUsed = Date.now();
-        return activeConnection;
-    }
-    
-    // Ensure no active connection is in the process of closing
-    if (activeConnection) {
-        console.log(`Waiting for active connection ${activeConnection.botId} to fully close...`);
-        await activeConnection.cleanupPromise;
-        activeConnection = null;
-    }
-    
-    if (activateFromPool) {
-        const healthyConnections = connectionPool.filter(conn => 
-            conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData && Date.now() - conn.lastUsed < CONNECTION_IDLE_TIMEOUT);
-        console.log(`Healthy pool connections available: ${healthyConnections.length}/${connectionPool.length}`);
-        
-        if (healthyConnections.length > 0) {
-            healthyConnections.sort((a, b) => b.createdAt - a.createdAt);
-            const chosenConn = healthyConnections[0];
-            const poolIndex = connectionPool.indexOf(chosenConn);
-            if (poolIndex !== -1) {
-                connectionPool.splice(poolIndex, 1);
-                console.log(`⚡ Using connection from pool (pool size now: ${connectionPool.length}/${POOL_MAX_SIZE})`);
-                try {
-                    console.time('connectionActivation');
-                    await chosenConn.activateWarmConnection();
-                    console.timeEnd('connectionActivation');
-                    activeConnection = chosenConn;
-                    if (connectionPool.length < POOL_MIN_SIZE) {
-                        console.log(`Pool running low (${connectionPool.length}), triggering maintenance`);
-                        Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in triggered pool maintenance:", err)));
+ 
+    currentConnectionPromise = new Promise(async (resolve, reject) => {
+        try {
+            const now = Date.now();
+            if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
+                const waitTime = 1000 - (now - lastCloseTime);
+                console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
+                await new Promise(res => setTimeout(res, waitTime));
+            }
+ 
+            console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
+            if (activeConnection && activeConnection.state === CONNECTION_STATES.READY &&
+                activeConnection.socket && activeConnection.socket.readyState === WebSocket.OPEN) {
+                console.log(`Reusing existing active connection ${activeConnection.botId}`);
+                activeConnection.lastUsed = Date.now();
+                resolve(activeConnection);
+                return;
+            }
+            
+            // Ensure no active connection is in the process of closing
+            if (activeConnection) {
+                console.log(`Waiting for active connection ${activeConnection.botId} to fully close...`);
+                await activeConnection.cleanupPromise;
+                activeConnection = null;
+            }
+            
+            if (activateFromPool) {
+                const healthyConnections = connectionPool.filter(conn =>
+                    conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData && Date.now() - conn.lastUsed < CONNECTION_IDLE_TIMEOUT);
+                console.log(`Healthy pool connections available: ${healthyConnections.length}/${connectionPool.length}`);
+                
+                if (healthyConnections.length > 0) {
+                    healthyConnections.sort((a, b) => b.createdAt - a.createdAt);
+                    const chosenConn = healthyConnections[0];
+                    const poolIndex = connectionPool.indexOf(chosenConn);
+                    if (poolIndex !== -1) {
+                        connectionPool.splice(poolIndex, 1);
+                        console.log(`⚡ Using connection from pool (pool size now: ${connectionPool.length}/${POOL_MAX_SIZE})`);
+                        try {
+                            console.time('connectionActivation');
+                            await chosenConn.activateWarmConnection();
+                            activeConnection = chosenConn;
+                            if (connectionPool.length < POOL_MIN_SIZE) {
+                                console.log(`Pool running low (${connectionPool.length}), triggering maintenance`);
+                                Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in triggered pool maintenance:", err)));
+                            }
+                            resolve(chosenConn);
+                            return;
+                        } catch (error) {
+                            console.error("Failed to activate pool connection:", error.message || error);
+                            await chosenConn.cleanup();
+                        } finally {
+                            console.timeEnd('connectionActivation');
+                        }
                     }
-                    return chosenConn;
-                } catch (error) {
-                    console.error("Failed to activate pool connection:", error.message || error);
-                    await chosenConn.cleanup();
                 }
             }
+            
+            console.log("Creating new connection (pool unavailable or disabled)");
+            const newConn = createConnection();
+            try {
+                console.time('newConnectionCreation');
+                await newConn.initialize(false);
+                activeConnection = newConn;
+                Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in post-creation pool maintenance:", err)));
+                resolve(newConn);
+            } catch (error) {
+                console.error("Failed to create new connection:", error.message || error);
+                await newConn.cleanup();
+                reject(error);
+            } finally {
+                console.timeEnd('newConnectionCreation');
+            }
+        } catch (err) {
+            reject(err);
+        } finally {
+            currentConnectionPromise = null; // Reset after the promise settles
         }
-    }
-    
-    console.log("Creating new connection (pool unavailable or disabled)");
-    const newConn = createConnection();
-    try {
-        console.time('newConnectionCreation');
-        await newConn.initialize(false);
-        console.timeEnd('newConnectionCreation');
-        activeConnection = newConn;
-        Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => console.error("Error in post-creation pool maintenance:", err)));
-        return newConn;
-    } catch (error) {
-        console.error("Failed to create new connection:", error.message || error);
-        await newConn.cleanup();
-        throw error;
-    }
+    });
+ 
+    return currentConnectionPromise;
 }
 
 async function getMonitoringConnection() {
     return getConnection(false);
 }
 
-async function tryReconnectWithBackoff() {
-    reconnectAttempt++;
-    const backoffTime = Math.min(RECONNECT_BACKOFF_BASE * Math.pow(1.5, reconnectAttempt - 1), 1000);
-    console.log(`⚡ Quick reconnect attempt ${reconnectAttempt} with ${backoffTime}ms backoff...`);
-    return new Promise((resolve, reject) => {
-        setTimeout(async () => {
-            try {
-                const conn = await getConnection(true);
-                resolve(conn);
-            } catch (error) {
-                console.error(`Reconnect attempt ${reconnectAttempt} failed:`, error.message || error);
-                if (reconnectAttempt < MAX_RECONNECT_ATTEMPTS) {
-                    try {
-                        const conn = await tryReconnectWithBackoff();
-                        resolve(conn);
-                    } catch (err) {
-                        reject(err);
-                    }
-                } else {
-                    console.error(`Giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
-                    reconnectAttempt = 0;
-                    reject(new Error("Maximum reconnection attempts reached"));
-                }
-            }
-        }, backoffTime);
-    });
-}
 
 function createConnection() {
     const rcKey = getNextRC();
     const rcValue = config[rcKey];
-    console.log(`Creating connection with ${rcKey}: ${rcValue}`);
+    console.log(`DEBUG: Creating new connection instance with ${rcKey}: ${rcValue}`);
     const conn = {
         socket: null,
         state: CONNECTION_STATES.CLOSED,
@@ -575,8 +619,8 @@ function createConnection() {
         cleanupResolve: null,
         cleanupPromise: null,
         lastActionCommand: null, // Track last action command
-        attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
-        defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state
+        attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
+        defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -591,6 +635,7 @@ function createConnection() {
         },
         
         initialize: function(stopAtHash = false) {
+            console.log(`DEBUG: Initializing connection object for ${this.rcKey} (stopAtHash: ${stopAtHash})...`);
             if (this.initPromise) return this.initPromise;
             
             this.initPromise = new Promise((resolve, reject) => {
@@ -600,19 +645,19 @@ function createConnection() {
                     this.authenticating = true;
                     console.log(`Initializing new connection with ${this.rcKey}: ${this.recoveryCode} (stopAtHash: ${stopAtHash})...`);
                     
-                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", { rejectUnauthorized: false, handshakeTimeout: 1000 });
+                    this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", { rejectUnauthorized: false, handshakeTimeout: 15000 });
                     this.connectionTimeout = setTimeout(() => {
                         console.log("Connection initialization timeout");
                         this.authenticating = false;
                         this.cleanup();
                         reject(new Error("Connection initialization timeout"));
-                    }, 3000);
+                    }, 30000);
                     
                     this.socket.on('open', () => {
                         this.state = CONNECTION_STATES.CONNECTED;
                         console.log("WebSocket connected, initializing identity");
                         this.send(":ru IDENT 352 -2 4030 1 2 :GALA");
-                        initializeTimingStates(this); // Initialize timing states for this connection
+                        initializeTimingStates(this); // Initialize timing states for this connection from global
                     });
                     
                     this.socket.on('message', async (data) => {
@@ -707,7 +752,7 @@ function createConnection() {
                             // parts[2] = flag (e.g., 1)
                             // parts[3] = senderId (user's ID)
                             // parts[4] = :`[R]OLE[X]`, hi (start of message content, including the leading colon)
-
+                            
                             if (parts.length >= 5) {
                                 const targetId = parts[3]; // Our bot's ID
                                 const senderId = parts[1]; // The user ID who sent the message
@@ -726,7 +771,7 @@ function createConnection() {
                                         console.log(`AI Chat: Removed username prefix, question is now: "${question}"`);
                                     }
                                     console.log(`AI Chat: Received question: "${question}"`);
-
+                                    
                                     if (question) {
                                         getMistralChatResponse(question)
                                             .then(aiResponse => {
@@ -781,15 +826,16 @@ function createConnection() {
                     case "999":
                         this.state = CONNECTION_STATES.AUTHENTICATED;
                         console.log(`Connection [${this.botId}] authenticated, sending setup commands...`);
-                        this.send("FWLISTVER 0");
-                        this.send("ADDONS 0 0");
-                        this.send("MYADDONS 0 0");
-                        this.send("PHONE 0 0 0 2 :Node.js");
-                        this.send("JOIN");
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("FWLISTVER 0");
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("ADDONS 0 0");
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("MYADDONS 0 0");
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("PHONE 0 0 0 2 :Node.js");
+                        if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("JOIN");
                         this.state = CONNECTION_STATES.READY;
                         this.authenticating = false;
                         this.userCommandRetryCount = 0;
-                        reconnectAttempt = 0;
+                        // reconnectAttempt = 0; // Keep reconnectAttempt continuous for alternating backoff
+                        
                         if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
                         console.log(`Connection [${this.botId}] is now READY`);
                         resolve(this);
@@ -913,7 +959,7 @@ function createConnection() {
                             this.cleanup();
                             console.log(`⚡ Got 451 error, trying immediate recovery...`);
                             reject(new Error(`Critical error 451`));
-                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 451 error:`, e))));
+                            Promise.resolve().then(() => getConnection(true).catch(err => console.error(`Failed after 451 error:`, err)));
                             return;
                         }
                         this.cleanup();
@@ -941,9 +987,12 @@ function createConnection() {
                             if (this === activeConnection) {
                                 activeConnection = null;
                             }
-                            console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying immediate recovery...`);
+                            console.log(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying recovery with 10-second backoff...`);
                             reject(new Error(`Critical error 452 after retries`));
-                            Promise.resolve().then(() => getConnection(true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 452 error:`, e))));
+                            // Introduce a 10-second delay before attempting to get a new connection
+                            // setTimeout(() => {
+                            //     Promise.resolve().then(() => getConnection(true).catch(err => console.error(`Failed after 452 error:`, e))));
+                            // }, 1000); // 10 seconds delay
                             return;
                         } else {
                             this.cleanup();
@@ -966,7 +1015,7 @@ function createConnection() {
                                 console.log(`850 error but no active mode, current mode: ${currentMode}`);
                             }
                             // Trigger reconnection after handling the 850 error
-                            Promise.resolve().then(() => getConnection(true, true).catch(err => tryReconnectWithBackoff().catch(e => console.error(`Failed after 850 error:`, e))));
+                            Promise.resolve().then(() => getConnection(true, true).catch(err => console.error(`Failed after 850 error:`, err)));
                             return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
                             console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
@@ -1021,7 +1070,7 @@ function createConnection() {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 1000);
+                    }, 2000);
     
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
@@ -1039,20 +1088,20 @@ function createConnection() {
                                     
                                     this.state = CONNECTION_STATES.AUTHENTICATED;
                                     console.log(`⚡ Warm connection [${this.botId}] authenticated, sending setup commands...`);
-                                    this.send("FWLISTVER 0");
-                                    this.send("ADDONS 0 0");
-                                    this.send("MYADDONS 0 0");
-                                    this.send("PHONE 0 0 0 2 :Node.js");
-                                    this.send("JOIN");
+                                    if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("FWLISTVER 0");
+                                    if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("ADDONS 0 0");
+                                    if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("MYADDONS 0 0");
+                                    if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("PHONE 0 0 0 2 :Node.js");
+                                    if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("JOIN");
                                     this.state = CONNECTION_STATES.READY;
                                     this.authenticating = false;
                                     this.userCommandRetryCount = 0;
-                                    reconnectAttempt = 0;
+                                    // reconnectAttempt = 0; // Keep reconnectAttempt continuous for alternating backoff
                                     
                                     if (this.connectionTimeout) clearTimeout(this.connectionTimeout);
                                     console.log(`✅ Warm connection [${this.botId}] SUCCESSFULLY activated and READY`);
                                     
-                                    initializeTimingStates(this); // Initialize timing states for this connection
+                                    initializeTimingStates(this); // Initialize timing states for this connection from global
                                     resolve(this);
                                 }
                             };
@@ -1343,6 +1392,7 @@ async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay 
 }
 
 async function handleRivals(rivals, mode, connection) {
+    console.log(`DEBUG: handleRivals entered. isOddReconnectAttempt: ${isOddReconnectAttempt}`);
     if (!connection.botId || rivals.length === 0) {
         console.log(`No rivals to handle or bot ID not set`);
         return;
@@ -1412,13 +1462,24 @@ async function handleRivals(rivals, mode, connection) {
     
     console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
     try {
-        console.time('reconnectAfterAction');
-        await new Promise(resolve => setTimeout(resolve, 500)); // Re-introduce 250ms delay
-        await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
-        console.timeEnd('reconnectAfterAction');
+        const reconnectTimerLabel = `reconnectAfterAction_${Date.now()}`; // Unique label for each timer
+        console.time(reconnectTimerLabel);
+        if (config.dualRCToggle === false) {
+            const delay = isOddReconnectAttempt ? 500 : 1500; // 500ms for odd, 1500ms for even
+            console.log(`⚡ Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            isOddReconnectAttempt = !isOddReconnectAttempt; // Toggle for the next attempt immediately after delay
+            await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
+        } else {
+            // This block remains as is, using a fixed 500ms delay
+            await new Promise(resolve => setTimeout(resolve, 500));
+            await getConnection(true, true);
+        }
+        console.timeEnd(reconnectTimerLabel); // Use the unique label
     } catch (error) {
         console.error("Failed to get new connection after rival handling:", error.message || error);
-        await tryReconnectWithBackoff().catch(retryError => console.error("All reconnection attempts failed:", retryError.message || retryError));
+        // Removed tryReconnectWithBackoff as per user's request.
+        // Now, if getConnection fails, it will simply log the error.
     }
     // Timing increment will now be handled by the 850 error message if applicable, or by the new connection's initialization.
 }
