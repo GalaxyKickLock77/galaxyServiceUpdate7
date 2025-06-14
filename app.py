@@ -40,7 +40,7 @@ def write_config_instant(data, form_number):
         "RC1_attackIntervalTime": int(data[f'RC1_attackIntervalTime{form_number}']),
         "RC1_startDefenceTime": int(data[f'RC1_startDefenceTime{form_number}']),
         "RC1_stopDefenceTime": int(data[f'RC1_stopDefenceTime{form_number}']),
-        "RC1_defenceIntervalTime": int(data[f'RC1_defenceIntervalTime{form_number}'])
+        "RC1_defenceIntervalTime": int(data[f'RC1_defenceIntervalTime{form_number}']),
         "planetName": data[f'PlanetName{form_number}'],
         "rival": data[f'Rival{form_number}'].split(',') if isinstance(data[f'Rival{form_number}'], str) else data[f'Rival{form_number}'],
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
