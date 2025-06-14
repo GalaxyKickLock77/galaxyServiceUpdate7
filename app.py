@@ -40,22 +40,25 @@ def write_config_instant(data, form_number):
         "RC1_attackIntervalTime": int(data[f'RC1_attackIntervalTime{form_number}']),
         "RC1_startDefenceTime": int(data[f'RC1_startDefenceTime{form_number}']),
         "RC1_stopDefenceTime": int(data[f'RC1_stopDefenceTime{form_number}']),
-        "RC1_defenceIntervalTime": int(data[f'RC1_defenceIntervalTime{form_number}']),
-        "RC2_startAttackTime": int(data[f'RC2_startAttackTime{form_number}']),
-        "RC2_stopAttackTime": int(data[f'RC2_stopAttackTime{form_number}']),
-        "RC2_attackIntervalTime": int(data[f'RC2_attackIntervalTime{form_number}']),
-        "RC2_startDefenceTime": int(data[f'RC2_startDefenceTime{form_number}']),
-        "RC2_stopDefenceTime": int(data[f'RC2_stopDefenceTime{form_number}']),
-        "RC2_defenceIntervalTime": int(data[f'RC2_defenceIntervalTime{form_number}']),
+        "RC1_defenceIntervalTime": int(data[f'RC1_defenceIntervalTime{form_number}'])
         "planetName": data[f'PlanetName{form_number}'],
         "rival": data[f'Rival{form_number}'].split(',') if isinstance(data[f'Rival{form_number}'], str) else data[f'Rival{form_number}'],
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}']),
         "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}']),
-        "dualRCToggle": string_to_bool(data[f'dualRCToggle{form_number}']),
-        # Add timestamp to force file change detection
-        "lastUpdated": int(time.time() * 1000)
+        "dualRCToggle": string_to_bool(data[f'dualRCToggle{form_number}'])
     }
+
+    if config['dualRCToggle']:
+        config["RC2_startAttackTime"] = int(data[f'RC2_startAttackTime{form_number}'])
+        config["RC2_stopAttackTime"] = int(data[f'RC2_stopAttackTime{form_number}'])
+        config["RC2_attackIntervalTime"] = int(data[f'RC2_attackIntervalTime{form_number}'])
+        config["RC2_startDefenceTime"] = int(data[f'RC2_startDefenceTime{form_number}'])
+        config["RC2_stopDefenceTime"] = int(data[f'RC2_stopDefenceTime{form_number}'])
+        config["RC2_defenceIntervalTime"] = int(data[f'RC2_defenceIntervalTime{form_number}'])
+
+    # Add timestamp to force file change detection
+    config["lastUpdated"] = int(time.time() * 1000)
     
     config_cache[form_number] = config
     
