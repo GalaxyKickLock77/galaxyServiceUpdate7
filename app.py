@@ -52,6 +52,7 @@ def write_config_instant(data, form_number):
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}']),
         "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}']),
+        "dualRCToggle": string_to_bool(data[f'dualRCToggle{form_number}']),
         # Add timestamp to force file change detection
         "lastUpdated": int(time.time() * 1000)
     }
@@ -178,7 +179,7 @@ def start_galaxy(form_number):
                         'startDefenceTime': 'startDefenceTime', 'stopDefenceTime': 'stopDefenceTime',
                         'defenceIntervalTime': 'defenceIntervalTime', 'PlanetName': 'planetName',
                         'Rival': 'rival', 'standOnEnemy': 'standOnEnemy', 'actionOnEnemy': 'actionOnEnemy',
-                        'aiChatToggle': 'aiChatToggle'
+                        'aiChatToggle': 'aiChatToggle', 'dualRCToggle': 'dualRCToggle'
                     }
                     
                     for key, val in data.items():

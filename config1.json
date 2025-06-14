@@ -4,8 +4,8 @@
   "RC1_startAttackTime": 1850,
   "RC1_stopAttackTime": 1875,
   "RC1_attackIntervalTime": 5,
-  "RC1_startDefenceTime": 1775,
-  "RC1_stopDefenceTime": 1810,
+  "RC1_startDefenceTime": 1850,
+  "RC1_stopDefenceTime": 1925,
   "RC1_defenceIntervalTime": 5,
   "RC2_startAttackTime": 1820,
   "RC2_stopAttackTime": 1900,
@@ -18,5 +18,5 @@
   "standOnEnemy": "true",
   "actionOnEnemy": "true",
   "aiChatToggle": "false",
-  "Dual_RC_Toggle": "true"
+  "dualRCToggle": "false"
 }

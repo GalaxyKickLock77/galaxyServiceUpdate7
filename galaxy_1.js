@@ -81,8 +81,8 @@ let monitoringMode = true;
 let lastUsedRC = 'RC2'; // Start with RC2 so first connection uses RC1
 
 function getNextRC() {
-    if (config.Dual_RC_Toggle === false) {
-        console.log("Dual_RC_Toggle is false, using only RC1 for reconnection.");
+    if (config.dualRCToggle === false) {
+        console.log("dualRCToggle is false, using only RC1 for reconnection.");
         return 'RC1';
     }
     lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
@@ -145,7 +145,7 @@ function updateConfigValues() {
             config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-            config.Dual_RC_Toggle = config.Dual_RC_Toggle === "true" || config.Dual_RC_Toggle === true;
+            config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
@@ -155,7 +155,8 @@ function updateConfigValues() {
                 rivalNames,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
-                aiChatToggle: config.aiChatToggle
+                aiChatToggle: config.aiChatToggle,
+                dualRCToggle: config.dualRCToggle
             });
             
             // Re-initialize timing states for all connections if needed
@@ -1463,7 +1464,7 @@ async function handleRivals(rivals, mode, connection) {
     try {
         const reconnectTimerLabel = `reconnectAfterAction_${Date.now()}`; // Unique label for each timer
         console.time(reconnectTimerLabel);
-        if (config.Dual_RC_Toggle === false) {
+        if (config.dualRCToggle === false) {
             const delay = isOddReconnectAttempt ? 500 : 1500; // 500ms for odd, 1500ms for even
             console.log(`⚡ Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
