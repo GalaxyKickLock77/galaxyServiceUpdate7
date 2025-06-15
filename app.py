@@ -42,7 +42,9 @@ def write_config_instant(data, form_number):
         "RC1_stopDefenceTime": int(data[f'RC1_stopDefenceTime{form_number}']),
         "RC1_defenceIntervalTime": int(data[f'RC1_defenceIntervalTime{form_number}']),
         "planetName": data[f'PlanetName{form_number}'],
-        "rival": data[f'Rival{form_number}'].split(',') if isinstance(data[f'Rival{form_number}'], str) else data[f'Rival{form_number}'],
+        "blackListRival": data[f'blackListRival{form_number}'].split(',') if isinstance(data[f'blackListRival{form_number}'], str) else data[f'blackListRival{form_number}'],
+        "whiteListMember": data[f'whiteListMember{form_number}'].split(',') if isinstance(data[f'whiteListMember{form_number}'], str) else data[f'whiteListMember{form_number}'],
+        "kickAllToggle": string_to_bool(data[f'kickAllToggle{form_number}']),
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}']),
         "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}']),
@@ -181,8 +183,10 @@ def start_galaxy(form_number):
                         'stopAttackTime': 'stopAttackTime', 'attackIntervalTime': 'attackIntervalTime',
                         'startDefenceTime': 'startDefenceTime', 'stopDefenceTime': 'stopDefenceTime',
                         'defenceIntervalTime': 'defenceIntervalTime', 'PlanetName': 'planetName',
-                        'Rival': 'rival', 'standOnEnemy': 'standOnEnemy', 'actionOnEnemy': 'actionOnEnemy',
-                        'aiChatToggle': 'aiChatToggle', 'dualRCToggle': 'dualRCToggle'
+                        'blackListRival': 'blackListRival', 'whiteListMember': 'whiteListMember',
+                        'kickAllToggle': 'kickAllToggle', 'standOnEnemy': 'standOnEnemy',
+                        'actionOnEnemy': 'actionOnEnemy', 'aiChatToggle': 'aiChatToggle',
+                        'dualRCToggle': 'dualRCToggle'
                     }
                     
                     for key, val in data.items():

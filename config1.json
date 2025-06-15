@@ -16,9 +16,9 @@
   "planetName": "THE_BOT",
   "blackListRival": [""],
   "whiteListMember": [""],
-  "kickAll": "false",
+  "kickAllToggle": "false",
   "standOnEnemy": "true",
   "actionOnEnemy": "true",
-  "aiChatToggle": "fakse",
+  "aiChatToggle": "false",
   "dualRCToggle": "false"
 }

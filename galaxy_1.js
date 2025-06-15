@@ -152,7 +152,7 @@ function updateConfigValues() {
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
             config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
-            config.kickAll = config.kickAll === "true" || config.kickAll === true; // Convert kickAll to boolean
+            config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true; // Convert kickAllToggle to boolean
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
@@ -165,7 +165,7 @@ function updateConfigValues() {
                 actionOnEnemy: config.actionOnEnemy,
                 aiChatToggle: config.aiChatToggle,
                 dualRCToggle: config.dualRCToggle,
-                kickAll: config.kickAll // Log the new kickAll value
+                kickAllToggle: config.kickAllToggle // Log the new kickAllToggle value
             });
             
             // Re-initialize timing states for all connections if needed
@@ -1193,8 +1193,8 @@ function createConnection() {
     }
 
 function handle353Wrapper(message, connection) {
-    if (config.kickAll) {
-        console.log(`kickAll is true. Dynamically parsing all users from 353 message.`);
+    if (config.kickAllToggle) {
+        console.log(`kickAllToggle is true. Dynamically parsing all users from 353 message.`);
         const colonIndex = message.indexOf(" :");
         const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
         const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
@@ -1342,8 +1342,8 @@ function handle353Wrapper(message, connection) {
 }
 
 function handleJoinCommandWrapper(parts, connection) {
-    if (config.kickAll) {
-        console.log(`kickAll is true. Dynamically parsing user from JOIN command.`);
+    if (config.kickAllToggle) {
+        console.log(`kickAllToggle is true. Dynamically parsing user from JOIN command.`);
         if (parts.length >= 4) {
             let name = parts.length >= 5 && !isNaN(parts[3]) ? parts[2] : parts[1];
             let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
