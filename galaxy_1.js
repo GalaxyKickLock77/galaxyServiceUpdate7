@@ -733,10 +733,10 @@ function createConnection() {
                 this.lastReceivedMessage = message;
                 
                 const prisonWords = ["PRISON", "Prison", "Тюрьма"];
-                if (prisonWords.some(word => message.split(/\s+/).includes(word))) {
+                if (prisonWords.some(word => message.includes(word))) { // Changed to includes for broader match
                     console.log(`🔒 Exact prison keyword detected: "${message}"`);
                     handlePrisonAutomation(this);
-                    return;
+                    return; // Exit immediately if prison keyword is detected
                 }
                 
                 const colonIndex = message.indexOf(" :");
