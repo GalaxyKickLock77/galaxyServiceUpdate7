@@ -1223,6 +1223,10 @@ function createConnection() {
     }
 
 function handle353Wrapper(message, connection, timestamp) {
+    if (connection.prisonState !== 'IDLE') {
+        console.log(`Skipping 353 processing: Bot is in prison state (${connection.prisonState}) [${connection.botId}]`);
+        return;
+    }
     if (config.kickAllToggle) {
         console.log(`kickAllToggle is true. Dynamically parsing users from 353 message to find a single target.`);
         const colonIndex = message.indexOf(" :");
@@ -1393,6 +1397,10 @@ function handle353Wrapper(message, connection, timestamp) {
 }
 
 function handleJoinCommandWrapper(parts, connection, timestamp) {
+    if (connection.prisonState !== 'IDLE') {
+        console.log(`Skipping JOIN processing: Bot is in prison state (${connection.prisonState}) [${connection.botId}]`);
+        return;
+    }
     if (config.kickAllToggle) {
         console.log(`kickAllToggle is true. Dynamically parsing user from JOIN command.`);
         if (parts.length >= 4) {
