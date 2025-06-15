@@ -630,6 +630,8 @@ function createConnection() {
         lastActionCommand: null, // Track last action command
         attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
+        last353ProcessedTime: 0, // New: Timestamp of last 353 command processed
+        lastJoinProcessedTime: 0, // New: Timestamp of last JOIN command processed
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -850,9 +852,25 @@ function createConnection() {
                         resolve(this);
                         break;
                     case "353":
+                        const DEBOUNCE_TIME_MS = 1000; // 1 second debounce
+                        const now = Date.now();
+                        if (now - this.last353ProcessedTime < DEBOUNCE_TIME_MS || now - this.lastJoinProcessedTime < DEBOUNCE_TIME_MS) {
+                            console.log(`Skipping 353 command due to debounce. Last 353: ${this.last353ProcessedTime}, Last JOIN: ${this.lastJoinProcessedTime}, Current: ${now}`);
+                            break;
+                        }
+                        this.last353ProcessedTime = now;
+                        this.lastJoinProcessedTime = now; // Also debounce JOIN if 353 is processed
                         handle353Wrapper(message, this);
                         break;
                     case "JOIN":
+                        const DEBOUNCE_TIME_MS_JOIN = 1000; // 1 second debounce for JOIN
+                        const nowJoin = Date.now();
+                        if (nowJoin - this.lastJoinProcessedTime < DEBOUNCE_TIME_MS_JOIN || nowJoin - this.last353ProcessedTime < DEBOUNCE_TIME_MS_JOIN) {
+                            console.log(`Skipping JOIN command due to debounce. Last JOIN: ${this.lastJoinProcessedTime}, Last 353: ${this.last353ProcessedTime}, Current: ${nowJoin}`);
+                            break;
+                        }
+                        this.lastJoinProcessedTime = nowJoin;
+                        this.last353ProcessedTime = nowJoin; // Also debounce 353 if JOIN is processed
                         handleJoinCommandWrapper(parts, this);
                         break;
                     case "PART":
@@ -866,22 +884,38 @@ function createConnection() {
                         console.log(`Updated founderIds: ${founderIds.join(', ')}`);
                         // Process pending kicks after founderIds are updated
                         if (pendingKicks.length > 0) {
-                            console.log(`Processing ${pendingKicks.length} pending kicks...`);
-                            for (const kick of pendingKicks) {
-                                // Only send REMOVE if coordinate exists and it's not a founder, self, or whitelisted member
-                                if (kick.coordinate && !founderIds.includes(kick.id) && kick.id !== kick.connectionBotId && kick.name !== kick.connectionNick && !whiteListMemberNames.includes(kick.name)) {
+                            console.log(`Processing pending kicks...`);
+                            // Filter for valid targets and pick the first one if kickAllToggle is true
+                            const validPendingKicks = pendingKicks.filter(kick =>
+                                kick.coordinate &&
+                                !founderIds.includes(kick.id) &&
+                                kick.id !== kick.connectionBotId &&
+                                kick.name !== kick.connectionNick &&
+                                !whiteListMemberNames.includes(kick.name)
+                            );
+
+                            if (config.kickAllToggle && validPendingKicks.length > 0) {
+                                const targetKick = validPendingKicks[0]; // Select only one
+                                console.log(`Executing delayed REMOVE ${targetKick.coordinate} for single target user ${targetKick.name} (ID: ${targetKick.id}) [${targetKick.connectionBotId}]`);
+                                if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && activeConnection.botId === targetKick.connectionBotId) {
+                                    activeConnection.send(`REMOVE ${targetKick.coordinate}`);
+                                    // Also trigger handleBlackListRivals for this single target
+                                    handleBlackListRivals([{ name: targetKick.name, id: targetKick.id }], 'defence', activeConnection);
+                                } else {
+                                    console.warn(`Skipping delayed REMOVE for ${targetKick.name}: connection not active, ready, or changed.`);
+                                }
+                            } else if (!config.kickAllToggle) {
+                                // Original behavior for kickAllToggle false: process all blacklisted rivals
+                                for (const kick of validPendingKicks) {
                                     console.log(`Executing delayed REMOVE ${kick.coordinate} for user ${kick.name} (ID: ${kick.id}) [${kick.connectionBotId}]`);
-                                    // Ensure the connection is still active and ready before sending
                                     if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && activeConnection.botId === kick.connectionBotId) {
                                         activeConnection.send(`REMOVE ${kick.coordinate}`);
                                     } else {
                                         console.warn(`Skipping delayed REMOVE for ${kick.name}: connection not active, ready, or changed.`);
                                     }
-                                } else {
-                                    console.log(`Skipping queued kick for ${kick.name} (ID: ${kick.id}): now identified as founder, self, or whitelisted, or no coordinate.`);
                                 }
                             }
-                            pendingKicks = []; // Clear the queue
+                            pendingKicks = []; // Clear the queue after processing
                         }
                         break;
                     case "KICK":
@@ -1194,12 +1228,12 @@ function createConnection() {
 
 function handle353Wrapper(message, connection) {
     if (config.kickAllToggle) {
-        console.log(`kickAllToggle is true. Dynamically parsing all users from 353 message.`);
+        console.log(`kickAllToggle is true. Dynamically parsing users from 353 message to find a single target.`);
         const colonIndex = message.indexOf(" :");
         const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
         const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
         let i = 0;
-        let allUsers = [];
+        let targetRival = null; // Will store the single rival to act upon
 
         while (i < tokens.length) {
             let token = tokens[i];
@@ -1230,26 +1264,45 @@ function handle353Wrapper(message, connection) {
                         }
                     }
                     
-                    if (founderIds.length === 0) {
-                        console.log(`Queueing potential kick for ${name} (ID: ${id}) from 353, awaiting FOUNDER info.`);
-                        pendingKicks.push({ name, id, coordinate, connectionBotId: connection.botId, connectionNick: connection.nick });
-                    } else {
-                        allUsers.push({ name, id });
-                        userMap[name] = id; // Still update userMap for general use
-                        console.log(`Dynamically detected user (non-founder, non-self, non-whitelisted) [${connection.botId}]: ${name} with ID ${id}`);
+                    userMap[name] = id; // Always update userMap
 
-                        if (config.standOnEnemy && coordinate && connection.state === CONNECTION_STATES.READY) {
-                            console.log(`Sending REMOVE ${coordinate} for user ${name} [${connection.botId}]`);
-                            connection.send(`REMOVE ${coordinate}`);
+                    if (founderIds.length === 0) {
+                        // If founderIds are not yet available, queue this potential kick
+                        // Only queue if we haven't already queued one from this 353 message
+                        const isAlreadyQueued = pendingKicks.some(pk => pk.id === id);
+                        if (!isAlreadyQueued) {
+                            console.log(`Queueing potential kick for ${name} (ID: ${id}) from 353, awaiting FOUNDER info.`);
+                            pendingKicks.push({ name, id, coordinate, connectionBotId: connection.botId, connectionNick: connection.nick });
+                        }
+                    } else {
+                        // If founderIds are available, and we haven't found a target yet, set this as the target
+                        if (!targetRival) {
+                            targetRival = { name, id, coordinate };
+                            console.log(`Selected single target rival [${connection.botId}]: ${name} with ID ${id}`);
+                            // Break here as we only need one target from the 353 message
+                            break;
                         }
                     }
                 }
                 i++;
             }
         }
-        if (allUsers.length > 0 && connection.state === CONNECTION_STATES.READY) {
-            console.log(`Dynamically detected users in 353 [${connection.botId}]: ${allUsers.map(u => u.name).join(', ')} - Defence mode activated`);
-            handleBlackListRivals(allUsers, 'defence', connection);
+        
+        // Now, act on the single targetRival if found
+        if (targetRival && connection.state === CONNECTION_STATES.READY) {
+            if (config.standOnEnemy && targetRival.coordinate) {
+                console.log(`Sending REMOVE ${targetRival.coordinate} for single target user ${targetRival.name} [${connection.botId}]`);
+                connection.send(`REMOVE ${targetRival.coordinate}`);
+            }
+            console.log(`Activating Defence mode for single target rival [${connection.botId}]: ${targetRival.name}`);
+            handleBlackListRivals([targetRival], 'defence', connection); // Pass only the single target
+            return; // Ensure only one rival is processed per 353 message
+        } else if (founderIds.length === 0 && pendingKicks.length > 0) {
+            // If we queued a pending kick, but founderIds are still not available, do nothing further here.
+            // The FOUNDER handler will process pendingKicks when founderIds become available.
+            console.log(`No immediate action on 353 as founderIds are pending and potential kick queued.`);
+        } else {
+            console.log(`No suitable rival found in 353 message for kicking.`);
         }
     } else {
         // Existing logic for kickAll = false
@@ -1374,6 +1427,7 @@ function handleJoinCommandWrapper(parts, connection) {
                         connection.send(`REMOVE ${coordinate}`);
                     }
                     handleBlackListRivals([{ name, id }], 'attack', connection);
+                    return; // Ensure only one rival is processed per JOIN message
                 }
             }
         }
