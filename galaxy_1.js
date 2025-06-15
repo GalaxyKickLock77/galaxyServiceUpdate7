@@ -858,9 +858,7 @@ function createConnection() {
                             console.log(`Skipping 353 command due to debounce. Last 353: ${this.last353ProcessedTime}, Last JOIN: ${this.lastJoinProcessedTime}, Current: ${now}`);
                             break;
                         }
-                        this.last353ProcessedTime = now;
-                        this.lastJoinProcessedTime = now; // Also debounce JOIN if 353 is processed
-                        handle353Wrapper(message, this);
+                        handle353Wrapper(message, this, now); // Pass 'now' to the wrapper
                         break;
                     case "JOIN":
                         const DEBOUNCE_TIME_MS_JOIN = 1000; // 1 second debounce for JOIN
@@ -869,9 +867,7 @@ function createConnection() {
                             console.log(`Skipping JOIN command due to debounce. Last JOIN: ${this.lastJoinProcessedTime}, Last 353: ${this.last353ProcessedTime}, Current: ${nowJoin}`);
                             break;
                         }
-                        this.lastJoinProcessedTime = nowJoin;
-                        this.last353ProcessedTime = nowJoin; // Also debounce 353 if JOIN is processed
-                        handleJoinCommandWrapper(parts, this);
+                        handleJoinCommandWrapper(parts, this, nowJoin); // Pass 'nowJoin' to the wrapper
                         break;
                     case "PART":
                         if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
@@ -1226,7 +1222,7 @@ function createConnection() {
     return conn;
     }
 
-function handle353Wrapper(message, connection) {
+function handle353Wrapper(message, connection, timestamp) {
     if (config.kickAllToggle) {
         console.log(`kickAllToggle is true. Dynamically parsing users from 353 message to find a single target.`);
         const colonIndex = message.indexOf(" :");
@@ -1296,6 +1292,8 @@ function handle353Wrapper(message, connection) {
             }
             console.log(`Activating Defence mode for single target rival [${connection.botId}]: ${targetRival.name}`);
             handleBlackListRivals([targetRival], 'defence', connection); // Pass only the single target
+            connection.last353ProcessedTime = timestamp; // Update timestamp only if action is taken
+            connection.lastJoinProcessedTime = timestamp; // Also update JOIN timestamp for mutual debounce
             return; // Ensure only one rival is processed per 353 message
         } else if (founderIds.length === 0 && pendingKicks.length > 0) {
             // If we queued a pending kick, but founderIds are still not available, do nothing further here.
@@ -1394,7 +1392,7 @@ function handle353Wrapper(message, connection) {
     }
 }
 
-function handleJoinCommandWrapper(parts, connection) {
+function handleJoinCommandWrapper(parts, connection, timestamp) {
     if (config.kickAllToggle) {
         console.log(`kickAllToggle is true. Dynamically parsing user from JOIN command.`);
         if (parts.length >= 4) {
@@ -1427,6 +1425,8 @@ function handleJoinCommandWrapper(parts, connection) {
                         connection.send(`REMOVE ${coordinate}`);
                     }
                     handleBlackListRivals([{ name, id }], 'attack', connection);
+                    connection.lastJoinProcessedTime = timestamp; // Update timestamp only if action is taken
+                    connection.last353ProcessedTime = timestamp; // Also update 353 timestamp for mutual debounce
                     return; // Ensure only one rival is processed per JOIN message
                 }
             }
