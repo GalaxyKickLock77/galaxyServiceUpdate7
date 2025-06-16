@@ -32,14 +32,11 @@ let prisonMaintenanceInProgress = false;
 let lastCloseTime = 0;
 // Configuration
 let config;
-let blackListRivalNames = [];
-let whiteListMemberNames = []; // New global variable to store whitelisted member names
+let rivalNames = [];
 let userMap = {};
-let founderIds = []; // New global variable to store founder IDs
 let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
 let currentMode = null;
 let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
-let pendingKicks = []; // New global variable to store kicks pending founder ID resolution
  
  // Connection pool settings
  const MAX_RECONNECT_ATTEMPTS = 5;
@@ -136,12 +133,9 @@ function updateConfigValues() {
             // Update the config object
             config = configData;
             
-            // Process blackListRival names
-            blackListRivalNames = Array.isArray(config.blackListRival) ? config.blackListRival : config.blackListRival.split(',').map(name => name.trim());
+            // Process rival names
+            rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
             
-            // Process whiteListMember names
-            whiteListMemberNames = Array.isArray(config.whiteListMember) ? config.whiteListMember : config.whiteListMember.split(',').map(name => name.trim());
-
             // Validate required fields
             if (!config.RC1 || !config.RC2) {
                 throw new Error("Config must contain both RC1 and RC2");
@@ -152,20 +146,17 @@ function updateConfigValues() {
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
             config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
-            config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true; // Convert kickAllToggle to boolean
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
             }
             
             console.log(`Configuration updated at ${new Date().toISOString()}:`, {
-                blackListRivalNames,
-                whiteListMemberNames, // Log the new whiteListMemberNames
+                rivalNames,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
                 aiChatToggle: config.aiChatToggle,
-                dualRCToggle: config.dualRCToggle,
-                kickAllToggle: config.kickAllToggle // Log the new kickAllToggle value
+                dualRCToggle: config.dualRCToggle
             });
             
             // Re-initialize timing states for all connections if needed
@@ -630,8 +621,6 @@ function createConnection() {
         lastActionCommand: null, // Track last action command
         attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
-        last353ProcessedTime: 0, // New: Timestamp of last 353 command processed
-        lastJoinProcessedTime: 0, // New: Timestamp of last JOIN command processed
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
@@ -733,10 +722,10 @@ function createConnection() {
                 this.lastReceivedMessage = message;
                 
                 const prisonWords = ["PRISON", "Prison", "Тюрьма"];
-                if (prisonWords.some(word => message.includes(word))) { // Changed to includes for broader match
+                if (prisonWords.some(word => message.split(/\s+/).includes(word))) {
                     console.log(`🔒 Exact prison keyword detected: "${message}"`);
                     handlePrisonAutomation(this);
-                    return; // Exit immediately if prison keyword is detected
+                    return;
                 }
                 
                 const colonIndex = message.indexOf(" :");
@@ -852,67 +841,13 @@ function createConnection() {
                         resolve(this);
                         break;
                     case "353":
-                        const DEBOUNCE_TIME_MS = 1000; // 1 second debounce
-                        const now = Date.now();
-                        if (now - this.last353ProcessedTime < DEBOUNCE_TIME_MS || now - this.lastJoinProcessedTime < DEBOUNCE_TIME_MS) {
-                            console.log(`Skipping 353 command due to debounce. Last 353: ${this.last353ProcessedTime}, Last JOIN: ${this.lastJoinProcessedTime}, Current: ${now}`);
-                            break;
-                        }
-                        handle353Wrapper(message, this, now); // Pass 'now' to the wrapper
+                        parse353(message, this);
                         break;
                     case "JOIN":
-                        const DEBOUNCE_TIME_MS_JOIN = 1000; // 1 second debounce for JOIN
-                        const nowJoin = Date.now();
-                        if (nowJoin - this.lastJoinProcessedTime < DEBOUNCE_TIME_MS_JOIN || nowJoin - this.last353ProcessedTime < DEBOUNCE_TIME_MS_JOIN) {
-                            console.log(`Skipping JOIN command due to debounce. Last JOIN: ${this.lastJoinProcessedTime}, Last 353: ${this.last353ProcessedTime}, Current: ${nowJoin}`);
-                            break;
-                        }
-                        handleJoinCommandWrapper(parts, this, nowJoin); // Pass 'nowJoin' to the wrapper
+                        handleJoinCommand(parts, this);
                         break;
                     case "PART":
                         if (parts.length >= commandIndex + 2) remove_user(parts[commandIndex + 1]);
-                        break;
-                    case "FOUNDER":
-                        // Example: FOUNDER 14358744 54531773
-                        // The command is followed by a list of founder IDs.
-                        // We need to extract these IDs and store them.
-                        founderIds = parts.slice(commandIndex + 1).filter(id => /^\d+$/.test(id));
-                        console.log(`Updated founderIds: ${founderIds.join(', ')}`);
-                        // Process pending kicks after founderIds are updated
-                        if (pendingKicks.length > 0) {
-                            console.log(`Processing pending kicks...`);
-                            // Filter for valid targets and pick the first one if kickAllToggle is true
-                            const validPendingKicks = pendingKicks.filter(kick =>
-                                kick.coordinate &&
-                                !founderIds.includes(kick.id) &&
-                                kick.id !== kick.connectionBotId &&
-                                kick.name !== kick.connectionNick &&
-                                !whiteListMemberNames.includes(kick.name)
-                            );
-
-                            if (config.kickAllToggle && validPendingKicks.length > 0) {
-                                const targetKick = validPendingKicks[0]; // Select only one
-                                console.log(`Executing delayed REMOVE ${targetKick.coordinate} for single target user ${targetKick.name} (ID: ${targetKick.id}) [${targetKick.connectionBotId}]`);
-                                if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && activeConnection.botId === targetKick.connectionBotId) {
-                                    activeConnection.send(`REMOVE ${targetKick.coordinate}`);
-                                    // Also trigger handleBlackListRivals for this single target
-                                    handleBlackListRivals([{ name: targetKick.name, id: targetKick.id }], 'defence', activeConnection);
-                                } else {
-                                    console.warn(`Skipping delayed REMOVE for ${targetKick.name}: connection not active, ready, or changed.`);
-                                }
-                            } else if (!config.kickAllToggle) {
-                                // Original behavior for kickAllToggle false: process all blacklisted rivals
-                                for (const kick of validPendingKicks) {
-                                    console.log(`Executing delayed REMOVE ${kick.coordinate} for user ${kick.name} (ID: ${kick.id}) [${kick.connectionBotId}]`);
-                                    if (activeConnection && activeConnection.state === CONNECTION_STATES.READY && activeConnection.botId === kick.connectionBotId) {
-                                        activeConnection.send(`REMOVE ${kick.coordinate}`);
-                                    } else {
-                                        console.warn(`Skipping delayed REMOVE for ${kick.name}: connection not active, ready, or changed.`);
-                                    }
-                                }
-                            }
-                            pendingKicks = []; // Clear the queue after processing
-                        }
                         break;
                     case "KICK":
                         console.log(`🔓 KICK command detected: ${message}`);
@@ -1222,250 +1157,119 @@ function createConnection() {
     return conn;
     }
 
-function handle353Wrapper(message, connection, timestamp) {
-    if (connection.prisonState !== 'IDLE') {
-        console.log(`Skipping 353 processing: Bot is in prison state (${connection.prisonState}) [${connection.botId}]`);
+function parse353(message, connection) {
+    if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
+        console.log(`🔒 Prison mention detected: "${message}"`);
+        handlePrisonAutomation(connection);
         return;
     }
-    if (config.kickAllToggle) {
-        console.log(`kickAllToggle is true. Dynamically parsing users from 353 message to find a single target.`);
-        const colonIndex = message.indexOf(" :");
-        const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
-        const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-        let i = 0;
-        let targetRival = null; // Will store the single rival to act upon
-
-        while (i < tokens.length) {
-            let token = tokens[i];
-            if (token === '-' || token === '@' || token === '+') {
-                i++;
-                continue;
-            }
-
-            let name = token;
-            if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
-                name = token.substring(1);
-            }
-
+    
+    const colonIndex = message.indexOf(" :");
+    const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
+    console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
+    console.log(`Parsed payload: ${payload}`);
+    
+    const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    let i = 0;
+    let detectedRivals = [];
+    
+    console.log(`Tokenized payload into: [${tokens.join(', ')}]`);
+    
+    while (i < tokens.length) {
+        let token = tokens[i];
+        if (token === '-') {
+            console.log(`Skipping separator token: "${token}"`);
             i++;
-            if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
-                const id = tokens[i];
-                console.log(`DEBUG: Checking user ${name} (ID: ${id}). Current founderIds: [${founderIds.join(', ')}], botId: ${connection.botId}, nick: ${connection.nick}, whiteListMemberNames: [${whiteListMemberNames.join(', ')}]`);
-                // Skip if user is a founder, the bot itself, or a whitelisted member
-                if (founderIds.includes(id) || id === connection.botId || name === connection.nick || whiteListMemberNames.includes(name)) {
-                    console.log(`Skipping founder, self, or whitelisted member: ${name} with ID ${id}`);
-                } else {
+            continue;
+        }
+        
+        let name = token;
+        let hasPrefix = false;
+        if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
+            name = token.substring(1);
+            hasPrefix = true;
+        }
+        
+        if (name.length === 0) {
+            console.log(`Skipping empty name`);
+            i++;
+            continue;
+        }
+        
+        if (name === '-' || name === '@' || name === '+') {
+            console.log(`Skipping separator token: "${name}"`);
+            i++;
+            continue;
+        }
+        
+        console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
+        
+        const isRivalName = rivalNames.includes(name);
+        if (isRivalName) {
+            console.log(`🎯 Exact rival match found: "${name}"`);
+        }
+        
+        i++;
+        
+        if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
+            const id = tokens[i];
+            userMap[name] = id;
+            console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
+            
+            if (isRivalName) {
+                detectedRivals.push({ name, id });
+                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+                
+                if (config.standOnEnemy) {
                     let coordinate = null;
                     for (let j = i + 1; j < tokens.length; j++) {
                         if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
                             coordinate = tokens[j + 5];
-                            console.log(`Found coordinate ${coordinate} for user ${name} in 353 message`);
-                            break;
-                        }
-                    }
-                    
-                    userMap[name] = id; // Always update userMap
-
-                    if (founderIds.length === 0) {
-                        // If founderIds are not yet available, queue this potential kick
-                        // Only queue if we haven't already queued one from this 353 message
-                        const isAlreadyQueued = pendingKicks.some(pk => pk.id === id);
-                        if (!isAlreadyQueued) {
-                            console.log(`Queueing potential kick for ${name} (ID: ${id}) from 353, awaiting FOUNDER info.`);
-                            pendingKicks.push({ name, id, coordinate, connectionBotId: connection.botId, connectionNick: connection.nick });
-                        }
-                    } else {
-                        // If founderIds are available, and we haven't found a target yet, set this as the target
-                        if (!targetRival) {
-                            targetRival = { name, id, coordinate };
-                            console.log(`Selected single target rival [${connection.botId}]: ${name} with ID ${id}`);
-                            // Break here as we only need one target from the 353 message
-                            break;
-                        }
-                    }
-                }
-                i++;
-            }
-        }
-        
-        // Now, act on the single targetRival if found
-        if (targetRival && connection.state === CONNECTION_STATES.READY) {
-            if (config.standOnEnemy && targetRival.coordinate) {
-                console.log(`Sending REMOVE ${targetRival.coordinate} for single target user ${targetRival.name} [${connection.botId}]`);
-                connection.send(`REMOVE ${targetRival.coordinate}`);
-            }
-            console.log(`Activating Defence mode for single target rival [${connection.botId}]: ${targetRival.name}`);
-            handleBlackListRivals([targetRival], 'defence', connection); // Pass only the single target
-            connection.last353ProcessedTime = timestamp; // Update timestamp only if action is taken
-            connection.lastJoinProcessedTime = timestamp; // Also update JOIN timestamp for mutual debounce
-            return; // Ensure only one rival is processed per 353 message
-        } else if (founderIds.length === 0 && pendingKicks.length > 0) {
-            // If we queued a pending kick, but founderIds are still not available, do nothing further here.
-            // The FOUNDER handler will process pendingKicks when founderIds become available.
-            console.log(`No immediate action on 353 as founderIds are pending and potential kick queued.`);
-        } else {
-            console.log(`No suitable rival found in 353 message for kicking.`);
-        }
-    } else {
-        // Existing logic for kickAll = false
-        if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
-            console.log(`🔒 Prison mention detected: "${message}"`);
-            handlePrisonAutomation(connection);
-            return;
-        }
-        
-        const colonIndex = message.indexOf(" :");
-        const payload = colonIndex !== -1 ? message.substring(colonIndex + 2) : "";
-        console.log(`Parsing 353 message [${connection.botId}]: ${message}`);
-        console.log(`Parsed payload: ${payload}`);
-        
-        const tokens = payload.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-        let i = 0;
-        let detectedRivals = [];
-        
-        console.log(`Tokenized payload into: [${tokens.join(', ')}]`);
-        
-        while (i < tokens.length) {
-            let token = tokens[i];
-            if (token === '-') {
-                console.log(`Skipping separator token: "${token}"`);
-                i++;
-                continue;
-            }
-            
-            let name = token;
-            let hasPrefix = false;
-            if (token.length > 1 && (token.startsWith('@') || token.startsWith('+'))) {
-                name = token.substring(1);
-                hasPrefix = true;
-            }
-            
-            if (name.length === 0) {
-                console.log(`Skipping empty name`);
-                i++;
-                continue;
-            }
-            
-            if (name === '-' || name === '@' || name === '+') {
-                console.log(`Skipping separator token: "${name}"`);
-                i++;
-                continue;
-            }
-            
-            console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
-            
-            const isBlackListRivalName = blackListRivalNames.includes(name);
-            if (isBlackListRivalName) {
-                console.log(`🎯 Exact blackListRival match found: "${name}"`);
-            }
-            
-            i++;
-            
-            if (i < tokens.length && /^\d+$/.test(tokens[i]) && tokens[i].length > 5) {
-                const id = tokens[i];
-                userMap[name] = id;
-                console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
-                
-                if (isBlackListRivalName) {
-                    detectedRivals.push({ name, id });
-                    console.log(`✅ Detected blackListRival [${connection.botId}]: ${name} with ID ${id}`);
-                    
-                    if (config.standOnEnemy) {
-                        let coordinate = null;
-                        for (let j = i + 1; j < tokens.length; j++) {
-                            if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
-                                coordinate = tokens[j + 5];
-                                console.log(`Found coordinate ${coordinate} for blackListRival ${name} in 353 message`);
-                                break;
-                            }
-                        }
-                        if (coordinate && connection.state === CONNECTION_STATES.READY) {
-                            console.log(`Sending REMOVE ${coordinate} for blackListRival ${name} [${connection.botId}]`);
-                            connection.send(`REMOVE ${coordinate}`);
-                        }
-                    }
-                }
-                i++;
-            }
-        }
-        
-        if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
-            console.log(`Detected blackListRivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
-            handleBlackListRivals(detectedRivals, 'defence', connection);
-        }
-    }
-}
-
-function handleJoinCommandWrapper(parts, connection, timestamp) {
-    if (connection.prisonState !== 'IDLE') {
-        console.log(`Skipping JOIN processing: Bot is in prison state (${connection.prisonState}) [${connection.botId}]`);
-        return;
-    }
-    if (config.kickAllToggle) {
-        console.log(`kickAllToggle is true. Dynamically parsing user from JOIN command.`);
-        if (parts.length >= 4) {
-            let name = parts.length >= 5 && !isNaN(parts[3]) ? parts[2] : parts[1];
-            let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
-            console.log(`DEBUG: Checking user ${name} (ID: ${id}) on JOIN. Current founderIds: [${founderIds.join(', ')}], botId: ${connection.botId}, nick: ${connection.nick}, whiteListMemberNames: [${whiteListMemberNames.join(', ')}]`);
-            // Skip if user is a founder, the bot itself, or a whitelisted member
-            if (founderIds.includes(id) || id === connection.botId || name === connection.nick || whiteListMemberNames.includes(name)) {
-                console.log(`Skipping founder, self, or whitelisted member: ${name} with ID ${id} on JOIN.`);
-            } else {
-                let coordinate = null;
-                if (config.standOnEnemy) {
-                    for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
-                        if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
-                            coordinate = parts[i + 5];
-                            console.log(`Found coordinate ${coordinate} for user ${name} in JOIN message`);
-                            break;
-                        }
-                    }
-                }
-                
-                if (founderIds.length === 0) {
-                    console.log(`Queueing potential kick for ${name} (ID: ${id}) from JOIN, awaiting FOUNDER info.`);
-                    pendingKicks.push({ name, id, coordinate, connectionBotId: connection.botId, connectionNick: connection.nick });
-                } else {
-                    userMap[name] = id; // Still update userMap for general use
-                    console.log(`Dynamically detected user (non-founder, non-self, non-whitelisted) joined with ID ${id} [${connection.botId}]`);
-                    if (config.standOnEnemy && coordinate && connection.state === CONNECTION_STATES.READY) {
-                        console.log(`Sending REMOVE ${coordinate} for user ${name} [${connection.botId}]`);
-                        connection.send(`REMOVE ${coordinate}`);
-                    }
-                    handleBlackListRivals([{ name, id }], 'attack', connection);
-                    connection.lastJoinProcessedTime = timestamp; // Update timestamp only if action is taken
-                    connection.last353ProcessedTime = timestamp; // Also update 353 timestamp for mutual debounce
-                    return; // Ensure only one rival is processed per JOIN message
-                }
-            }
-        }
-    } else {
-        // Existing logic for kickAll = false
-        if (parts.length >= 4) {
-            let name = parts.length >= 5 && !isNaN(parts[3]) ? parts[2] : parts[1];
-            let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
-            userMap[name] = id;
-            console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
-            if (blackListRivalNames.includes(name)) {
-                console.log(`BlackListRival ${name} joined [${connection.botId}] - Attack mode activated`);
-                
-                let coordinate = null;
-                if (config.standOnEnemy) {
-                    for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
-                        if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
-                            coordinate = parts[i + 5];
-                            console.log(`Found coordinate ${coordinate} for blackListRival ${name} in JOIN message`);
+                            console.log(`Found coordinate ${coordinate} for rival ${name} in 353 message`);
                             break;
                         }
                     }
                     if (coordinate && connection.state === CONNECTION_STATES.READY) {
-                        console.log(`Sending REMOVE ${coordinate} for blackListRival ${name} [${connection.botId}]`);
+                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
                         connection.send(`REMOVE ${coordinate}`);
                     }
                 }
-                
-                handleBlackListRivals([{ name, id }], 'attack', connection);
             }
+            i++;
+        }
+    }
+    
+    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
+        handleRivals(detectedRivals, 'defence', connection);
+    }
+}
+
+function handleJoinCommand(parts, connection) {
+    if (parts.length >= 4) {
+        let name = parts.length >= 5 && !isNaN(parts[3]) ? parts[2] : parts[1];
+        let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
+        userMap[name] = id;
+        console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
+        if (rivalNames.includes(name)) {
+            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
+            
+            let coordinate = null;
+            if (config.standOnEnemy) {
+                for (let i = parts.length >= 5 ? 4 : 3; i < parts.length; i++) {
+                    if (parts[i] === '@' && i + 5 < parts.length && !isNaN(parts[i + 5])) {
+                        coordinate = parts[i + 5];
+                        console.log(`Found coordinate ${coordinate} for rival ${name} in JOIN message`);
+                        break;
+                    }
+                }
+                if (coordinate && connection.state === CONNECTION_STATES.READY) {
+                    console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
+                    connection.send(`REMOVE ${coordinate}`);
+                }
+            }
+            
+            handleRivals([{ name, id }], 'attack', connection);
         }
     }
 }
@@ -1587,39 +1391,39 @@ async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay 
     }
 }
 
-async function handleBlackListRivals(blackListRivals, mode, connection) {
-    console.log(`DEBUG: handleBlackListRivals entered. isOddReconnectAttempt: ${isOddReconnectAttempt}`);
-    if (!connection.botId || blackListRivals.length === 0) {
-        console.log(`No blackListRivals to handle or bot ID not set`);
+async function handleRivals(rivals, mode, connection) {
+    console.log(`DEBUG: handleRivals entered. isOddReconnectAttempt: ${isOddReconnectAttempt}`);
+    if (!connection.botId || rivals.length === 0) {
+        console.log(`No rivals to handle or bot ID not set`);
         return;
     }
     
     currentMode = mode;
     const waitTime = getCurrentTiming(mode, connection);
-    console.log(`Handling blackListRivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
+    console.log(`Handling rivals in ${mode} mode with waitTime: ${waitTime}ms [${connection.botId}]`);
     console.log(`Timing state for ${connection.botId} - Attack: ${connection.attackTimingState.currentTime}ms (errors: ${connection.attackTimingState.consecutiveErrors}), Defense: ${connection.defenseTimingState.currentTime}ms (errors: ${connection.defenseTimingState.consecutiveErrors})`);
     
     monitoringMode = false;
     
     const ACTION_DELAY = 300; // Minimum delay between actions in ms
-    // Select only one detected blackListRival
-    const targetBlackListRival = blackListRivals[0];
-
-    if (!targetBlackListRival) {
-        console.log(`No target blackListRival selected, skipping actions.`);
+    // Select only one detected rival
+    const targetRival = rivals[0];
+    
+    if (!targetRival) {
+        console.log(`No target rival selected, skipping actions.`);
         return;
     }
 
-    const id = userMap[targetBlackListRival.name];
+    const id = userMap[targetRival.name];
     if (id) {
         if (config.actionOnEnemy && connection.lastActionCommand) {
             const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetBlackListRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
+                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
                     connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
                     setTimeout(() => {
-                        console.log(`Sending ACTION 3 to ${targetBlackListRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
+                        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
                         connection.send(`ACTION 3 ${id}`);
                         resolve();
                     }, ACTION_DELAY);
@@ -1629,14 +1433,14 @@ async function handleBlackListRivals(blackListRivals, mode, connection) {
             // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
             await new Promise(resolve => {
                 setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${targetBlackListRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
+                    console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
                     connection.send(`ACTION 3 ${id}`);
                     resolve();
                 }, waitTime);
             });
         }
     } else {
-        console.log(`Could not find ID for target blackListRival ${targetBlackListRival.name}, skipping actions.`);
+        console.log(`Could not find ID for target rival ${targetRival.name}, skipping actions.`);
         return; // Added return here to prevent further execution if no ID
     }
     
@@ -1647,7 +1451,7 @@ async function handleBlackListRivals(blackListRivals, mode, connection) {
     // Check if the connection was already handled by an 850 error (i.e., it's no longer activeConnection)
     // If activeConnection is null or different, it means the 850 handler already took over and cleaned up/reconnected.
     if (!activeConnection || activeConnection !== connection) {
-        console.log(`Connection already handled by 850 error or other cleanup, skipping handleBlackListRivals cleanup.`);
+        console.log(`Connection already handled by 850 error or other cleanup, skipping handleRivals cleanup.`);
         return; // Exit handleRivals, as 850 handler has taken over
     }
 
@@ -1673,7 +1477,7 @@ async function handleBlackListRivals(blackListRivals, mode, connection) {
         }
         console.timeEnd(reconnectTimerLabel); // Use the unique label
     } catch (error) {
-        console.error("Failed to get new connection after blackListRival handling:", error.message || error);
+        console.error("Failed to get new connection after rival handling:", error.message || error);
         // Removed tryReconnectWithBackoff as per user's request.
         // Now, if getConnection fails, it will simply log the error.
     }
