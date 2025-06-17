@@ -1005,33 +1005,6 @@ function createConnection() {
                             this.cleanup();
                         }
                         break;
-                    case "850":
-                        if (payload.includes("3 секунд(ы)")) {
-                            console.log(`⚡ 850 error with 3-second rule detected. Immediate QUIT and re-evaluation.`);
-                            this.send("QUIT :ds");
-                            await this.cleanup(); // Ensure connection is fully closed
-                            if (activeConnection === this) {
-                                activeConnection = null;
-                            }
-                            // Now proceed with the original 850 handling logic for timing adjustment and reconnection
-                            console.log(`850 error detected in mode: ${currentMode}`);
-                            if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, this, '3second');
-                                console.log(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
-                            } else {
-                                console.log(`850 error but no active mode, current mode: ${currentMode}`);
-                            }
-                            // Trigger reconnection after handling the 850 error
-                            Promise.resolve().then(() => getConnection(true, true).catch(err => console.error(`Failed after 850 error:`, err)));
-                            return; // Exit handleMessage after immediate QUIT and re-evaluation
-                        } else {
-                            console.log(`850 error (non-3second) in mode: ${currentMode} - ${payload}. Last action command: ${this.lastActionCommand || 'N/A'}`);
-                            if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, this, 'general_error');
-                                console.log(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
-                            }
-                        }
-                        break;
                     case "854": // Capture last action command
                         if (parts.length >= 2) {
                             this.lastActionCommand = parts[1];
@@ -1077,7 +1050,7 @@ function createConnection() {
                         console.log("Connection activation timeout");
                         this.authenticating = false;
                         reject(new Error("Connection activation timeout"));
-                    }, 2000);
+                    }, 2000); // Further optimized for faster warm connection activation
     
                     const parts = this.registrationData.split(/\s+/);
                     if (parts.length >= 4) {
@@ -1142,9 +1115,8 @@ function createConnection() {
                         if (sendQuit && this.socket.readyState === WebSocket.OPEN) {
                             this.send("QUIT :ds");
                         }
-                        setTimeout(() => {
-                            if (this.socket) this.socket.terminate();
-                        }, 100);
+                        // Removed 100ms delay for immediate socket termination
+                        if (this.socket) this.socket.terminate();
                     } else {
                         this.state = CONNECTION_STATES.CLOSED;
                         resolve();
@@ -1478,40 +1450,55 @@ async function handleRivals(rivals, mode, connection) {
         console.error(`Error sending actions to rival ${targetRival.name}:`, actionError);
     }
 
-    console.log(`Waiting briefly for server response after action (nano-second check)...`);
-    await new Promise(resolve => setTimeout(resolve, 10));
+    // Increment timing based on usual logic (success)
+    incrementTiming(mode, connection, 'success');
+    console.log(`Timing incremented for ${mode} mode after action.`);
 
-    if (!activeConnection || activeConnection !== connection) {
-        console.log(`Connection already handled by 850 error or other cleanup, skipping handleRivals cleanup.`);
-        activeRivalTarget = null;
-        return;
-    }
-
-    console.log(`Reloading WebSocket connection [${connection.botId}]`);
-    await connection.cleanup(true);
+    // Clear active connection and any pending connection promise immediately to allow a new connection attempt
     if (activeConnection === connection) activeConnection = null;
-    monitoringMode = true;
+    currentConnectionPromise = null; // Crucial for allowing a new getConnection call
+    monitoringMode = true; // Assume monitoring mode will be re-established by the new connection
 
-    console.log(`⚡ Connection ${connection.botId} closed, activating new connection`);
+    // --- START: Dedicated section for immediate QUIT and reconnection after ACTION 3 ---
+    console.log(`⚡ ACTION 3 complete. Immediately sending QUIT and terminating socket for fast relogin [${connection.botId}]`);
+    if (connection.socket && connection.socket.readyState === WebSocket.OPEN) {
+        connection.send("QUIT :ds");
+        connection.socket.terminate();
+    } else {
+        console.log(`Connection ${connection.botId} not open for direct QUIT/terminate.`);
+    }
+    // Ensure cleanup is fully completed before attempting new connection
+    console.log(`⚡ Awaiting cleanup of old connection [${connection.botId}]...`);
+    await connection.cleanup();
+    if (activeConnection === connection) {
+        activeConnection = null;
+    }
+    currentConnectionPromise = null; // Crucial for allowing a new getConnection call
+
+    // Immediately attempt to get a new connection, prioritizing warm connections
+    console.log(`⚡ Immediately activating new connection, prioritizing warm connections.`);
     try {
         const reconnectTimerLabel = `reconnectAfterAction_${Date.now()}`;
         console.time(reconnectTimerLabel);
-        if (config.dualRCToggle === false) {
+        if (config.dualRCToggle) {
+            // When dualRCToggle is enabled, use getPrisonConnection for warm connection
+            console.log(`⚡ Dual RC Toggle enabled. Attempting to get warm prison connection...`);
+            await getPrisonConnection();
+        } else {
+            // Fallback to regular getConnection with alternating backoff if dualRCToggle is false
             const delay = isOddReconnectAttempt ? 500 : 1500;
-            console.log(`⚡ Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
+            console.log(`⚡ Dual RC Toggle disabled. Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             isOddReconnectAttempt = !isOddReconnectAttempt;
-            await getConnection(true, true);
-        } else {
-            // Removed 100ms delay for superfast dual RC reconnection
             await getConnection(true, true);
         }
         console.timeEnd(reconnectTimerLabel);
     } catch (error) {
-        console.error("Failed to get new connection after rival handling:", error.message || error);
+        console.error("Failed to initiate new connection after rival handling:", error.message || error);
     } finally {
         activeRivalTarget = null;
     }
+    // --- END: Dedicated section for immediate QUIT and reconnection after ACTION 3 ---
 }
 
 async function handlePrisonAutomation(connection) {
