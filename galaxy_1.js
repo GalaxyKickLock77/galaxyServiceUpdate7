@@ -25,7 +25,7 @@ const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
 const PRISON_POOL_MIN_SIZE = 1;
 const PRISON_POOL_MAX_SIZE = 1;
 const PRISON_POOL_TARGET_SIZE = 1;
-const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000; // 1 minute for rapid turnover
+const PRISON_CONNECTION_MAX_AGE = 10 * 60 * 1000; // 1 minute for rapid turnover
 const PRISON_POOL_HEALTH_CHECK_INTERVAL = 1000; // 1 second for frequent checks
 
 let poolMaintenanceInProgress = false;
@@ -511,12 +511,13 @@ async function getConnection(activateFromPool = true, skipCloseTimeCheck = false
  
     currentConnectionPromise = new Promise(async (resolve, reject) => {
         try {
-            const now = Date.now();
-            if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
-                const waitTime = 1000 - (now - lastCloseTime);
-                console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
-                await new Promise(res => setTimeout(res, waitTime));
-            }
+            // Removed lastCloseTime check to allow immediate reconnection attempts as requested.
+            // const now = Date.now();
+            // if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
+            //     const waitTime = 1000 - (now - lastCloseTime);
+            //     console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
+            //     await new Promise(res => setTimeout(res, waitTime));
+            // }
  
             console.log(`Getting connection (activateFromPool: ${activateFromPool}, forceNew: ${forceNew})...`);
             // If forceNew is true, we explicitly do NOT reuse an existing active connection.
@@ -1108,17 +1109,18 @@ function createConnection() {
             });
         },
         
-        cleanup: function(sendQuit = false) {
+        cleanup: async function(sendQuit = false) { // Made function async
             if (this.cleanupPromise) return this.cleanupPromise;
             
-            this.cleanupPromise = new Promise((resolve) => {
+            this.cleanupPromise = new Promise(async (resolve) => { // Made promise executor async
                 this.cleanupResolve = resolve;
                 try {
                     if (this.socket) {
                         if (sendQuit && this.socket.readyState === WebSocket.OPEN) {
                             this.send("QUIT :ds");
+                            // Add a small delay to allow the QUIT command to be processed by the server
+                            await new Promise(res => setTimeout(res, 100)); // 100ms delay
                         }
-                        // Removed 100ms delay for immediate socket termination
                         if (this.socket) this.socket.terminate();
                     } else {
                         this.state = CONNECTION_STATES.CLOSED;
@@ -1480,7 +1482,8 @@ async function handleRivals(rivals, mode, connection) {
     monitoringMode = true; // Assume monitoring mode will be re-established by the new connection
 
     // Introduce a small delay to allow the system to fully process the closure
-    await new Promise(resolve => setTimeout(resolve, 50)); // 50ms delay
+    // This helps ensure the socket is completely terminated before a new connection is attempted.
+    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
 
     // Immediately attempt to get a new connection, prioritizing warm connections
     console.log(`⚡ Immediately activating new connection, prioritizing warm connections.`);

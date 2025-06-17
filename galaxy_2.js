@@ -25,7 +25,7 @@ const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
 const PRISON_POOL_MIN_SIZE = 1;
 const PRISON_POOL_MAX_SIZE = 1;
 const PRISON_POOL_TARGET_SIZE = 1;
-const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000; // 1 minute for rapid turnover
+const PRISON_CONNECTION_MAX_AGE = 10 * 60 * 1000; // 1 minute for rapid turnover
 const PRISON_POOL_HEALTH_CHECK_INTERVAL = 1000; // 1 second for frequent checks
 
 let poolMaintenanceInProgress = false;
@@ -39,6 +39,7 @@ let isOddReconnectAttempt = true; // Controls the odd/even alternation for recon
 let currentMode = null;
 let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
 let activeRivalTarget = null; // Tracks the ID of the rival currently being processed
+let isRivalProcessingInProgress = false; // New global flag to prevent concurrent rival processing
  
  // Connection pool settings
  const MAX_RECONNECT_ATTEMPTS = 5;
@@ -502,7 +503,7 @@ async function getPrisonConnection() {
     return getConnection(true);
 }
 
-async function getConnection(activateFromPool = true, skipCloseTimeCheck = false) {
+async function getConnection(activateFromPool = true, skipCloseTimeCheck = false, forceNew = false) {
     if (currentConnectionPromise) {
         console.log("Connection attempt already in progress, returning existing promise.");
         return currentConnectionPromise;
@@ -510,15 +511,17 @@ async function getConnection(activateFromPool = true, skipCloseTimeCheck = false
  
     currentConnectionPromise = new Promise(async (resolve, reject) => {
         try {
-            const now = Date.now();
-            if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
-                const waitTime = 1000 - (now - lastCloseTime);
-                console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
-                await new Promise(res => setTimeout(res, waitTime));
-            }
+            // Removed lastCloseTime check to allow immediate reconnection attempts as requested.
+            // const now = Date.now();
+            // if (!skipCloseTimeCheck && now - lastCloseTime < 500) {
+            //     const waitTime = 1000 - (now - lastCloseTime);
+            //     console.log(`Waiting ${waitTime}ms before attempting to get new connection (due to lastCloseTime)`);
+            //     await new Promise(res => setTimeout(res, waitTime));
+            // }
  
-            console.log(`Getting connection (activateFromPool: ${activateFromPool})...`);
-            if (activeConnection && activeConnection.state === CONNECTION_STATES.READY &&
+            console.log(`Getting connection (activateFromPool: ${activateFromPool}, forceNew: ${forceNew})...`);
+            // If forceNew is true, we explicitly do NOT reuse an existing active connection.
+            if (!forceNew && activeConnection && activeConnection.state === CONNECTION_STATES.READY &&
                 activeConnection.socket && activeConnection.socket.readyState === WebSocket.OPEN) {
                 console.log(`Reusing existing active connection ${activeConnection.botId}`);
                 activeConnection.lastUsed = Date.now();
@@ -527,10 +530,12 @@ async function getConnection(activateFromPool = true, skipCloseTimeCheck = false
             }
             
             // Ensure no active connection is in the process of closing
+            // If forceNew is true, we always clean up the existing active connection to get a fresh one.
             if (activeConnection) {
                 console.log(`Waiting for active connection ${activeConnection.botId} to fully close...`);
-                await activeConnection.cleanupPromise;
-                activeConnection = null;
+                // Ensure cleanup is awaited to prevent race conditions with new connections
+                await activeConnection.cleanup(true).catch(err => console.error(`Error during active connection cleanup:`, err));
+                activeConnection = null; // Explicitly nullify after cleanup
             }
             
             if (activateFromPool) {
@@ -591,7 +596,8 @@ async function getConnection(activateFromPool = true, skipCloseTimeCheck = false
 }
 
 async function getMonitoringConnection() {
-    return getConnection(false);
+    // Monitoring connection can reuse existing or get from pool, no forceNew needed
+    return getConnection(false, false, false); 
 }
 
 
@@ -932,12 +938,10 @@ function createConnection() {
                                 Promise.allSettled(parallelTasks).then(async (results) => {
                                     console.log(`Parallel tasks completed for ${this.botId}:`, results.map(r => r.value || r.reason));
                                     
-                                    console.log(`⚡ Sending QUIT command for fast relogin [${this.botId}]`);
-                                    this.send("QUIT :ds");
+                                    console.log(`⚡ Sending QUIT command and awaiting cleanup for fast relogin [${this.botId}]`);
                                     this.prisonState = 'IDLE';
-                                    
-                                    console.log(`⚡ Waiting for connection ${this.botId} to close before relogin`);
-                                    await this.cleanup();
+                                    // Ensure cleanup is fully completed before attempting new connection, sending QUIT command
+                                    await this.cleanup(true);
                                     if (activeConnection === this) {
                                         activeConnection = null;
                                     }
@@ -1105,17 +1109,18 @@ function createConnection() {
             });
         },
         
-        cleanup: function(sendQuit = false) {
+        cleanup: async function(sendQuit = false) { // Made function async
             if (this.cleanupPromise) return this.cleanupPromise;
             
-            this.cleanupPromise = new Promise((resolve) => {
+            this.cleanupPromise = new Promise(async (resolve) => { // Made promise executor async
                 this.cleanupResolve = resolve;
                 try {
                     if (this.socket) {
                         if (sendQuit && this.socket.readyState === WebSocket.OPEN) {
                             this.send("QUIT :ds");
+                            // Add a small delay to allow the QUIT command to be processed by the server
+                            await new Promise(res => setTimeout(res, 100)); // 100ms delay
                         }
-                        // Removed 100ms delay for immediate socket termination
                         if (this.socket) this.socket.terminate();
                     } else {
                         this.state = CONNECTION_STATES.CLOSED;
@@ -1223,7 +1228,13 @@ function parse353(message, connection) {
         // Take only the first rival and process it immediately
         const rivalToProcess = { ...detectedRivals[0], mode: 'defence' };
         console.log(`Immediately processing rival: ${rivalToProcess.name} (ID: ${rivalToProcess.id}) in ${rivalToProcess.mode} mode.`);
-        getConnection(true).then(conn => handleRivals([rivalToProcess], rivalToProcess.mode, conn)).catch(err => console.error("Error processing rival from 353:", err));
+        // Ensure handleRivals is called only if no rival processing is currently in progress
+        if (!isRivalProcessingInProgress) {
+            isRivalProcessingInProgress = true; // Set flag to true before starting processing
+            getConnection(true).then(conn => handleRivals([rivalToProcess], rivalToProcess.mode, conn)).catch(err => console.error("Error processing rival from 353:", err));
+        } else {
+            console.log(`Skipping processing of rival ${rivalToProcess.name} as another rival is already being processed.`);
+        }
     }
 }
 
@@ -1254,7 +1265,13 @@ function handleJoinCommand(parts, connection) {
             // Take the joined rival and process it immediately
             const joinedRival = { name, id };
             console.log(`Immediately processing joined rival: ${joinedRival.name} (ID: ${joinedRival.id}) in attack mode.`);
-            getConnection(true).then(conn => handleRivals([joinedRival], 'attack', conn)).catch(err => console.error("Error processing rival from JOIN:", err));
+            // Ensure handleRivals is called only if no rival processing is currently in progress
+            if (!isRivalProcessingInProgress) {
+                isRivalProcessingInProgress = true; // Set flag to true before starting processing
+                getConnection(true).then(conn => handleRivals([joinedRival], 'attack', conn)).catch(err => console.error("Error processing rival from JOIN:", err));
+            } else {
+                console.log(`Skipping processing of joined rival ${joinedRival.name} as another rival is already being processed.`);
+            }
         }
     }
 }
@@ -1455,25 +1472,18 @@ async function handleRivals(rivals, mode, connection) {
     console.log(`Timing incremented for ${mode} mode after action.`);
 
     // Clear active connection and any pending connection promise immediately to allow a new connection attempt
-    if (activeConnection === connection) activeConnection = null;
-    currentConnectionPromise = null; // Crucial for allowing a new getConnection call
+    // Ensure cleanup is fully completed before attempting new connection, sending QUIT command
+    console.log(`⚡ ACTION 3 complete. Immediately sending QUIT and awaiting cleanup for fast relogin [${connection.botId}]`);
+    await connection.cleanup(true);
+    
+    // Ensure activeConnection and currentConnectionPromise are nullified after cleanup
+    activeConnection = null;
+    currentConnectionPromise = null;
     monitoringMode = true; // Assume monitoring mode will be re-established by the new connection
 
-    // --- START: Dedicated section for immediate QUIT and reconnection after ACTION 3 ---
-    console.log(`⚡ ACTION 3 complete. Immediately sending QUIT and terminating socket for fast relogin [${connection.botId}]`);
-    if (connection.socket && connection.socket.readyState === WebSocket.OPEN) {
-        connection.send("QUIT :ds");
-        connection.socket.terminate();
-    } else {
-        console.log(`Connection ${connection.botId} not open for direct QUIT/terminate.`);
-    }
-    // Ensure cleanup is fully completed before attempting new connection
-    console.log(`⚡ Awaiting cleanup of old connection [${connection.botId}]...`);
-    await connection.cleanup();
-    if (activeConnection === connection) {
-        activeConnection = null;
-    }
-    currentConnectionPromise = null; // Crucial for allowing a new getConnection call
+    // Introduce a small delay to allow the system to fully process the closure
+    // This helps ensure the socket is completely terminated before a new connection is attempted.
+    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay
 
     // Immediately attempt to get a new connection, prioritizing warm connections
     console.log(`⚡ Immediately activating new connection, prioritizing warm connections.`);
@@ -1483,22 +1493,23 @@ async function handleRivals(rivals, mode, connection) {
         if (config.dualRCToggle) {
             // When dualRCToggle is enabled, use getPrisonConnection for warm connection
             console.log(`⚡ Dual RC Toggle enabled. Attempting to get warm prison connection...`);
-            await getPrisonConnection();
+            await getPrisonConnection(); // getPrisonConnection already calls getConnection(true)
         } else {
             // Fallback to regular getConnection with alternating backoff if dualRCToggle is false
             const delay = isOddReconnectAttempt ? 500 : 1500;
             console.log(`⚡ Dual RC Toggle disabled. Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
             await new Promise(resolve => setTimeout(resolve, delay));
             isOddReconnectAttempt = !isOddReconnectAttempt;
-            await getConnection(true, true);
+            // Force a new connection after an action, bypassing reuse logic
+            await getConnection(true, true, true); 
         }
         console.timeEnd(reconnectTimerLabel);
     } catch (error) {
         console.error("Failed to initiate new connection after rival handling:", error.message || error);
     } finally {
         activeRivalTarget = null;
+        isRivalProcessingInProgress = false; // Reset flag after processing is complete
     }
-    // --- END: Dedicated section for immediate QUIT and reconnection after ACTION 3 ---
 }
 
 async function handlePrisonAutomation(connection) {
