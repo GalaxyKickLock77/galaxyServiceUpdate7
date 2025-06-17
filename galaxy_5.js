@@ -1467,6 +1467,9 @@ async function handleRivals(rivals, mode, connection) {
         console.error(`Error sending actions to rival ${targetRival.name}:`, actionError);
     }
 
+    // Add 500ms delay after ACTION 3 completes
+    await new Promise(resolve => setTimeout(resolve, 500)); // 500ms delay after ACTION 3 completes
+
     // Increment timing based on usual logic (success)
     incrementTiming(mode, connection, 'success');
     console.log(`Timing incremented for ${mode} mode after action.`);
