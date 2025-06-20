@@ -32,7 +32,8 @@ let prisonMaintenanceInProgress = false;
 let lastCloseTime = 0;
 // Configuration
 let config;
-let rivalNames = [];
+let blackListRival = [];
+let whiteListMember = [];
 let userMap = {};
 let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
 let currentMode = null;
@@ -135,8 +136,9 @@ function updateConfigValues() {
             // Update the config object
             config = configData;
             
-            // Process rival names
-            rivalNames = Array.isArray(config.rival) ? config.rival : config.rival.split(',').map(name => name.trim());
+            // Process blackListRival and whiteListMember names
+            blackListRival = Array.isArray(config.blackListRival) ? config.blackListRival : config.blackListRival.split(',').map(name => name.trim());
+            whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : config.whiteListMember.split(',').map(name => name.trim());
             
             // Validate required fields
             if (!config.RC1 || !config.RC2) {
@@ -148,17 +150,20 @@ function updateConfigValues() {
             config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
             config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
             config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
+            config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
             
             if (typeof config.actionOnEnemy === 'undefined') {
                 throw new Error("Config must contain actionOnEnemy");
             }
             
             console.log(`Configuration updated at ${new Date().toISOString()}:`, {
-                rivalNames,
+                blackListRival,
+                whiteListMember,
                 standOnEnemy: config.standOnEnemy,
                 actionOnEnemy: config.actionOnEnemy,
                 aiChatToggle: config.aiChatToggle,
-                dualRCToggle: config.dualRCToggle
+                dualRCToggle: config.dualRCToggle,
+                kickAllToggle: config.kickAllToggle
             });
             
             // Re-initialize timing states for all connections if needed
@@ -1170,9 +1175,9 @@ function processPendingRivals() {
             let rivalConnection = null;
             let rivalMode = null;
 
-            // Iterate through pendingRivals to find the first one that matches a configured rivalName
+            // Iterate through pendingRivals to find the first one that matches a configured blackListRival
             for (const [name, data] of pendingRivals.entries()) {
-                if (rivalNames.includes(name)) {
+                if (blackListRival.includes(name)) {
                     rivalToActOn = { name: name, id: data.id };
                     rivalConnection = data.connection;
                     rivalMode = data.mode;
@@ -1239,9 +1244,14 @@ function parse353(message, connection) {
         
         console.log(`Processing token: "${token}" -> name: "${name}", hasPrefix: ${hasPrefix}`);
         
-        const isRivalName = rivalNames.includes(name);
-        if (isRivalName) {
-            console.log(`🎯 Exact rival match found: "${name}"`);
+        const isBlackListRival = blackListRival.includes(name);
+        const isWhiteListMember = whiteListMember.includes(name);
+
+        if (isBlackListRival) {
+            console.log(`🎯 Exact blackListRival match found: "${name}"`);
+        }
+        if (isWhiteListMember) {
+            console.log(`⭐ Exact whiteListMember match found: "${name}"`);
         }
         
         i++;
@@ -1251,9 +1261,12 @@ function parse353(message, connection) {
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
             
-            if (isRivalName) {
+            // Determine if the user is a rival based on kickAllToggle and lists
+            const isConsideredRival = config.kickAllToggle || (isBlackListRival && !isWhiteListMember);
+
+            if (isConsideredRival) {
                 detectedRivals.push({ name, id });
-                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id}`);
+                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id} (kickAllToggle: ${config.kickAllToggle})`);
                 
                 if (config.standOnEnemy) {
                     let coordinate = null;
@@ -1292,8 +1305,15 @@ function handleJoinCommand(parts, connection) {
         let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
         userMap[name] = id;
         console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
-        if (rivalNames.includes(name)) {
-            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated`);
+        
+        const isBlackListRival = blackListRival.includes(name);
+        const isWhiteListMember = whiteListMember.includes(name);
+
+        // Determine if the user is a rival based on kickAllToggle and lists
+        const isConsideredRival = config.kickAllToggle || (isBlackListRival && !isWhiteListMember);
+
+        if (isConsideredRival) {
+            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated (kickAllToggle: ${config.kickAllToggle})`);
             
             let coordinate = null;
             if (config.standOnEnemy) {
@@ -1316,6 +1336,9 @@ function handleJoinCommand(parts, connection) {
                 console.log(`Added rival ${name} to pending list from JOIN command.`);
             }
             processPendingRivals();
+        } else if (isWhiteListMember) {
+            console.log(`WhiteListMember ${name} joined [${connection.botId}] - No action taken.`);
+            // You can add specific actions for whiteListMember here if needed
         }
     }
 }
