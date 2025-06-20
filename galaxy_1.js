@@ -37,6 +37,8 @@ let userMap = {};
 let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
 let currentMode = null;
 let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
+let pendingRivals = new Map(); // Stores {name: {id, connection, mode}} for rivals detected in a short window
+let rivalProcessingTimeout = null; // Timeout for debouncing rival actions
  
  // Connection pool settings
  const MAX_RECONNECT_ATTEMPTS = 5;
@@ -1157,6 +1159,39 @@ function createConnection() {
     return conn;
     }
 
+function processPendingRivals() {
+    if (rivalProcessingTimeout) {
+        clearTimeout(rivalProcessingTimeout);
+    }
+    rivalProcessingTimeout = setTimeout(() => {
+        if (pendingRivals.size > 0) {
+            console.log(`Processing ${pendingRivals.size} pending rivals.`);
+            let rivalToActOn = null;
+            let rivalConnection = null;
+            let rivalMode = null;
+
+            // Iterate through pendingRivals to find the first one that matches a configured rivalName
+            for (const [name, data] of pendingRivals.entries()) {
+                if (rivalNames.includes(name)) {
+                    rivalToActOn = { name: name, id: data.id };
+                    rivalConnection = data.connection;
+                    rivalMode = data.mode;
+                    break; // Found a rival to act on, exit loop
+                }
+            }
+
+            if (rivalToActOn && rivalConnection && rivalConnection.state === CONNECTION_STATES.READY) {
+                console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}) from ${rivalMode} mode.`);
+                handleRivals([rivalToActOn], rivalMode, rivalConnection);
+            } else {
+                console.log(`No matching rivals found in pending list or connection not ready.`);
+            }
+            pendingRivals.clear(); // Clear the list after processing
+        }
+        rivalProcessingTimeout = null;
+    }, 50); // Process rivals after a very short debounce period (e.g., 50ms)
+}
+
 function parse353(message, connection) {
     if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
         console.log(`🔒 Prison mention detected: "${message}"`);
@@ -1240,8 +1275,14 @@ function parse353(message, connection) {
     }
     
     if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
-        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')} - Defence mode activated`);
-        handleRivals(detectedRivals, 'defence', connection);
+        console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')}`);
+        detectedRivals.forEach(rival => {
+            if (!pendingRivals.has(rival.name)) {
+                pendingRivals.set(rival.name, { id: rival.id, connection: connection, mode: 'defence' });
+                console.log(`Added rival ${rival.name} to pending list from 353 message.`);
+            }
+        });
+        processPendingRivals();
     }
 }
 
@@ -1269,7 +1310,12 @@ function handleJoinCommand(parts, connection) {
                 }
             }
             
-            handleRivals([{ name, id }], 'attack', connection);
+            // Add to pending rivals and process
+            if (!pendingRivals.has(name)) {
+                pendingRivals.set(name, { id: id, connection: connection, mode: 'attack' });
+                console.log(`Added rival ${name} to pending list from JOIN command.`);
+            }
+            processPendingRivals();
         }
     }
 }
