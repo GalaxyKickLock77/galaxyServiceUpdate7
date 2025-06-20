@@ -1518,7 +1518,7 @@ async function handleRivals(rivals, mode, connection) {
             await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
         } else {
             // This block remains as is, using a fixed 500ms delay
-            await new Promise(resolve => setTimeout(resolve, 500));
+            await new Promise(resolve => setTimeout(resolve, 50));
             await getConnection(true, true);
         }
         console.timeEnd(reconnectTimerLabel); // Use the unique label
