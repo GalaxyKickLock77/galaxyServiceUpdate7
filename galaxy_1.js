@@ -1175,13 +1175,23 @@ function processPendingRivals() {
             let rivalConnection = null;
             let rivalMode = null;
 
-            // Iterate through pendingRivals to find the first one that matches a configured blackListRival
-            for (const [name, data] of pendingRivals.entries()) {
-                if (blackListRival.includes(name)) {
+            if (config.kickAllToggle) {
+                // When kickAllToggle is true, pick the first available pending rival
+                for (const [name, data] of pendingRivals.entries()) {
                     rivalToActOn = { name: name, id: data.id };
                     rivalConnection = data.connection;
                     rivalMode = data.mode;
-                    break; // Found a rival to act on, exit loop
+                    break; // Pick the first one
+                }
+            } else {
+                // When kickAllToggle is false, only consider those in blackListRival
+                for (const [name, data] of pendingRivals.entries()) {
+                    if (blackListRival.includes(name)) {
+                        rivalToActOn = { name: name, id: data.id };
+                        rivalConnection = data.connection;
+                        rivalMode = data.mode;
+                        break; // Found a rival to act on, exit loop
+                    }
                 }
             }
 
@@ -1262,7 +1272,12 @@ function parse353(message, connection) {
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
             
             // Determine if the user is a rival based on kickAllToggle and lists
-            const isConsideredRival = config.kickAllToggle || (isBlackListRival && !isWhiteListMember);
+            let isConsideredRival;
+            if (config.kickAllToggle) {
+                isConsideredRival = (name !== connection.nick && id !== connection.botId && !isWhiteListMember);
+            } else {
+                isConsideredRival = (isBlackListRival && !isWhiteListMember);
+            }
 
             if (isConsideredRival) {
                 detectedRivals.push({ name, id });
@@ -1310,7 +1325,12 @@ function handleJoinCommand(parts, connection) {
         const isWhiteListMember = whiteListMember.includes(name);
 
         // Determine if the user is a rival based on kickAllToggle and lists
-        const isConsideredRival = config.kickAllToggle || (isBlackListRival && !isWhiteListMember);
+        let isConsideredRival;
+        if (config.kickAllToggle) {
+            isConsideredRival = (name !== connection.nick && id !== connection.botId && !isWhiteListMember);
+        } else {
+            isConsideredRival = (isBlackListRival && !isWhiteListMember);
+        }
 
         if (isConsideredRival) {
             console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated (kickAllToggle: ${config.kickAllToggle})`);
