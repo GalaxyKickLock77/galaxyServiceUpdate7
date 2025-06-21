@@ -35,15 +35,15 @@ let config;
 let blackListRival = [];
 let whiteListMember = [];
 let userMap = {};
-let founderId = null; // New global variable to store the dynamically identified founder ID
 let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
 let currentMode = null;
 let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
 let pendingRivals = new Map(); // Stores {name: {id, connection, mode}} for rivals detected in a short window
 let rivalProcessingTimeout = null; // Timeout for debouncing rival actions
- 
- // Connection pool settings
- const MAX_RECONNECT_ATTEMPTS = 5;
+let founderIds = new Set(); // Stores IDs of founders to be skipped
+
+// Connection pool settings
+const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_BACKOFF_BASE = 50; // Ultra-fast backoff base
 const DUAL_RC_BACKOFF_BASE = 1500;
 const DUAL_RC_MAX_BACKOFF = 3500; // Updated based on user's request for even backoff of 2500
@@ -797,22 +797,8 @@ function createConnection() {
                             }
                         }
                         break;
-                    case "FOUNDER":
-                        if (parts.length >= commandIndex + 2) {
-                            const newFounderId = parts[commandIndex + 1];
-                            if (founderId !== newFounderId) {
-                                founderId = newFounderId;
-                                console.log(`Dynamically identified founder ID: ${founderId}`);
-                                // Process any pending rivals that might have been added before founderId was known
-                                processPendingRivals(true); // Process immediately after founderId is known
-                            }
-                        }
-                        break;
-                    case "353":
-                        parse353(message, this);
-                        break;
-                    case "JOIN":
-                        handleJoinCommand(parts, this);
+                    case "PING":
+                        this.send("PONG");
                         break;
                     case "HAAAPSI":
                         if (parts.length >= commandIndex + 2) {
@@ -1047,6 +1033,13 @@ function createConnection() {
                             }
                         }
                         break;
+                    case "FOUNDER":
+                        if (parts.length >= commandIndex + 2) {
+                            const founderId = parts[commandIndex + 1];
+                            founderIds.add(founderId);
+                            console.log(`Added founder ID: ${founderId}. Current founderIds:`, Array.from(founderIds));
+                        }
+                        break;
                     case "854": // Capture last action command
                         if (parts.length >= 2) {
                             this.lastActionCommand = parts[1];
@@ -1179,80 +1172,40 @@ function createConnection() {
     return conn;
     }
 
-function processPendingRivals(immediate = false) {
-    const executeProcessing = () => {
+function processPendingRivals() {
+    if (rivalProcessingTimeout) {
+        clearTimeout(rivalProcessingTimeout);
+    }
+    rivalProcessingTimeout = setTimeout(() => {
         if (pendingRivals.size > 0) {
             console.log(`Processing ${pendingRivals.size} pending rivals.`);
             let rivalToActOn = null;
             let rivalConnection = null;
             let rivalMode = null;
 
-            if (config.kickAllToggle) {
-                // When kickAllToggle is true, pick the first available pending rival
-                for (const [name, data] of pendingRivals.entries()) {
+            // Iterate through pendingRivals to find the first one that matches criteria
+            for (const [name, data] of pendingRivals.entries()) {
+                // If kickAllToggle is true, any rival added to pendingRivals is considered valid.
+                // Otherwise, only rivals in blackListRival are considered.
+                if (config.kickAllToggle || blackListRival.includes(name)) {
                     rivalToActOn = { name: name, id: data.id };
                     rivalConnection = data.connection;
                     rivalMode = data.mode;
-                    break; // Pick the first one
+                    break; // Found a rival to act on, exit loop
                 }
-            } else {
-                // When kickAllToggle is false, only consider those in blackListRival
-                for (const [name, data] of pendingRivals.entries()) {
-                    if (blackListRival.includes(name)) {
-                        rivalToActOn = { name: name, id: data.id };
-                        rivalConnection = data.connection;
-                        rivalMode = data.mode;
-                        break; // Found a rival to act on, exit loop
-                    }
-                }
-            }
-
-            if (!founderId) {
-                console.log(`Deferring rival processing: founderId not yet identified.`);
-                // Do not clear pendingRivals, they will be processed once founderId is set
-                return;
             }
 
             if (rivalToActOn && rivalConnection && rivalConnection.state === CONNECTION_STATES.READY) {
-                // Re-check if the selected rival is the founder, in case founderId was just set
-                if (rivalToActOn.id === founderId) {
-                    console.log(`Skipping founder ${rivalToActOn.name} (ID: ${rivalToActOn.id}) from pending rival processing.`);
-                    pendingRivals.delete(rivalToActOn.name); // Remove founder from pending list
-                } else {
-                    console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}) from ${rivalMode} mode.`);
-                    handleRivals([rivalToActOn], rivalMode, rivalConnection);
-                    pendingRivals.delete(rivalToActOn.name); // Remove processed rival from pending list
-                }
-            } else if (rivalToActOn) {
-                console.log(`Deferring rival ${rivalToActOn.name} (ID: ${rivalToActOn.id}) processing: connection not ready (state: ${rivalConnection ? rivalConnection.state : 'N/A'}).`);
-                // Do not remove from pendingRivals, it will be retried later
+                console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}) from ${rivalMode} mode.`);
+                handleRivals([rivalToActOn], rivalMode, rivalConnection);
             } else {
-                console.log(`No matching rivals found in pending list.`);
+                console.log(`No matching rivals found in pending list or connection not ready.`);
             }
-        } else {
-            console.log(`No pending rivals to process.`);
+            pendingRivals.clear(); // Clear the list after processing
         }
         rivalProcessingTimeout = null;
-    };
-
-    if (immediate) {
-        console.log("Processing pending rivals immediately.");
-        executeProcessing();
-    } else {
-        if (rivalProcessingTimeout) {
-            clearTimeout(rivalProcessingTimeout);
-        }
-        rivalProcessingTimeout = setTimeout(executeProcessing, 50); // Process rivals after a very short debounce period (e.g., 50ms)
-    }
+    }, 50); // Process rivals after a very short debounce period (e.g., 50ms)
 }
-
-// New periodic check for deferred rivals
-setInterval(() => {
-    if (pendingRivals.size > 0) {
-        console.log(`Periodically re-checking ${pendingRivals.size} deferred rivals.`);
-        processPendingRivals(); // Re-trigger processing for any remaining rivals
-    }
-}, 5000); // Check every 5 seconds
 
 function parse353(message, connection) {
     if (message.includes('PRISON') || message.includes('Prison') || message.includes('Тюрьма')) {
@@ -1317,29 +1270,13 @@ function parse353(message, connection) {
             const id = tokens[i];
             userMap[name] = id;
             console.log(`Added to userMap [${connection.botId}]: ${name} -> ${id}`);
-
-            // Check if the user is the founder and should be skipped from rival consideration
-            if (founderId) {
-                if (id === founderId) {
-                    console.log(`Skipping founder ${name} (ID: ${id}) from rival consideration.`);
-                    i++;
-                    continue;
-                }
-            } else {
-                console.log(`Warning: founderId not yet identified. Cannot skip founder ${name} (ID: ${id}) from rival consideration.`);
-            }
             
-            // Determine if the user is a rival based on kickAllToggle and lists
-            let isConsideredRival;
-            if (config.kickAllToggle) {
-                isConsideredRival = (name !== connection.nick && id !== connection.botId && !isWhiteListMember);
-            } else {
-                isConsideredRival = (isBlackListRival && !isWhiteListMember);
-            }
+            // Determine if the user is a rival based on kickAllToggle and lists, prioritizing whiteListMember, skipping bot's own ID, and skipping founders
+            const isConsideredRival = !isWhiteListMember && (name !== connection.nick) && !founderIds.has(id) && (config.kickAllToggle || isBlackListRival);
 
             if (isConsideredRival) {
                 detectedRivals.push({ name, id });
-                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id} (kickAllToggle: ${config.kickAllToggle})`);
+                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id} (kickAllToggle: ${config.kickAllToggle}, whiteListMember: ${isWhiteListMember}, self: ${name === connection.nick}, founder: ${founderIds.has(id)})`);
                 
                 if (config.standOnEnemy) {
                     let coordinate = null;
@@ -1368,11 +1305,7 @@ function parse353(message, connection) {
                 console.log(`Added rival ${rival.name} to pending list from 353 message.`);
             }
         });
-        if (founderId) { // Process immediately if founderId is known
-            processPendingRivals(true);
-        } else {
-            processPendingRivals();
-        }
+        processPendingRivals();
     }
 }
 
@@ -1382,30 +1315,15 @@ function handleJoinCommand(parts, connection) {
         let id = parts.length >= 5 && !isNaN(parts[3]) ? parts[3] : parts[2];
         userMap[name] = id;
         console.log(`User ${name} joined with ID ${id} [${connection.botId}]`);
-
-        // Check if the user is the founder and should be skipped from rival consideration
-        if (founderId) {
-            if (id === founderId) {
-                console.log(`Skipping founder ${name} (ID: ${id}) from rival consideration.`);
-                return;
-            }
-        } else {
-            console.log(`Warning: founderId not yet identified. Cannot skip founder ${name} (ID: ${id}) from rival consideration.`);
-        }
         
         const isBlackListRival = blackListRival.includes(name);
         const isWhiteListMember = whiteListMember.includes(name);
 
-        // Determine if the user is a rival based on kickAllToggle and lists
-        let isConsideredRival;
-        if (config.kickAllToggle) {
-            isConsideredRival = (name !== connection.nick && id !== connection.botId && !isWhiteListMember);
-        } else {
-            isConsideredRival = (isBlackListRival && !isWhiteListMember);
-        }
+        // Determine if the user is a rival based on kickAllToggle and lists, prioritizing whiteListMember, skipping bot's own ID, and skipping founders
+        const isConsideredRival = !isWhiteListMember && (name !== connection.nick) && !founderIds.has(id) && (config.kickAllToggle || isBlackListRival);
 
         if (isConsideredRival) {
-            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated (kickAllToggle: ${config.kickAllToggle})`);
+            console.log(`Rival ${name} joined [${connection.botId}] - Attack mode activated (kickAllToggle: ${config.kickAllToggle}, whiteListMember: ${isWhiteListMember}, self: ${name === connection.nick}, founder: ${founderIds.has(id)})`);
             
             let coordinate = null;
             if (config.standOnEnemy) {
@@ -1427,11 +1345,7 @@ function handleJoinCommand(parts, connection) {
                 pendingRivals.set(name, { id: id, connection: connection, mode: 'attack' });
                 console.log(`Added rival ${name} to pending list from JOIN command.`);
             }
-            if (founderId) { // Process immediately if founderId is known
-                processPendingRivals(true);
-            } else {
-                processPendingRivals();
-            }
+            processPendingRivals();
         } else if (isWhiteListMember) {
             console.log(`WhiteListMember ${name} joined [${connection.botId}] - No action taken.`);
             // You can add specific actions for whiteListMember here if needed
@@ -1617,10 +1531,6 @@ async function handleRivals(rivals, mode, connection) {
     // If activeConnection is null or different, it means the 850 handler already took over and cleaned up/reconnected.
     if (!activeConnection || activeConnection !== connection) {
         console.log(`Connection already handled by 850 error or other cleanup, skipping handleRivals cleanup.`);
-        if (config.kickAllToggle) {
-            console.log(`Clearing pendingRivals due to kickAllToggle and connection already handled.`);
-            pendingRivals.clear();
-        }
         return; // Exit handleRivals, as 850 handler has taken over
     }
 
@@ -1633,10 +1543,6 @@ async function handleRivals(rivals, mode, connection) {
     try {
         const reconnectTimerLabel = `reconnectAfterAction_${Date.now()}`; // Unique label for each timer
         console.time(reconnectTimerLabel);
-        if (config.kickAllToggle) {
-            console.log(`Clearing pendingRivals after successful action and connection cleanup due to kickAllToggle.`);
-            pendingRivals.clear();
-        }
         if (config.dualRCToggle === false) {
             const delay = isOddReconnectAttempt ? 500 : 1500; // 500ms for odd, 1500ms for even
             console.log(`⚡ Quick reconnect attempt (odd/even: ${isOddReconnectAttempt ? 'odd' : 'even'}) with fixed backoff: ${delay}ms...`);
@@ -1686,7 +1592,6 @@ async function handlePrisonAutomation(connection) {
     }
 }
 
-// Initial setup and intervals (these will be called once when the module is imported)
 Promise.all([
     optimizedConnectionPoolMaintenance().catch(err => console.error("Initial pool setup failed:", err)),
     optimizedPrisonPoolMaintenance().catch(err => console.error("Initial prison pool setup failed:", err))
@@ -1819,108 +1724,3 @@ async function getMistralChatResponse(prompt) {
     });
 }
 // Removed global debugTimingStates as it's now per-connection
-
-module.exports = {
-    // Exporting variables for testing
-    config,
-    blackListRival,
-    whiteListMember,
-    userMap,
-    founderId,
-    isOddReconnectAttempt,
-    currentMode,
-    pendingRivals,
-    rivalProcessingTimeout,
-    CONNECTION_STATES,
-    globalTimingState,
-    connectionPool,
-    activeConnection,
-    prisonConnectionPool,
-    monitoringMode,
-    lastUsedRC,
-    lastCloseTime,
-
-    // Exporting functions for testing
-    updateConfigValues,
-    genHash,
-    incrementTiming,
-    getCurrentTiming,
-    optimizedConnectionPoolMaintenance,
-    createPoolConnections,
-    optimizedPrisonPoolMaintenance,
-    createPrisonConnections,
-    getPrisonConnection,
-    getConnection,
-    getMonitoringConnection,
-    createConnection,
-    processPendingRivals,
-    parse353,
-    handleJoinCommand,
-    remove_user,
-    performJailFreeFast,
-    performJailFreeWithRetry,
-    handleRivals,
-    handlePrisonAutomation,
-    getMistralChatResponse,
-
-    // Functions to reset state for testing
-    _resetState: function() {
-        config = undefined;
-        blackListRival = [];
-        whiteListMember = [];
-        userMap = {};
-        founderId = null;
-        isOddReconnectAttempt = true;
-        currentMode = null;
-        currentConnectionPromise = null;
-        pendingRivals = new Map();
-        rivalProcessingTimeout = null;
-        connectionPool.length = 0;
-        activeConnection = null;
-        prisonConnectionPool.length = 0;
-        globalTimingState = {
-            RC1: { attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 } },
-            RC2: { attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 } }
-        };
-        monitoringMode = true;
-        lastUsedRC = 'RC2';
-        lastCloseTime = 0;
-        poolMaintenanceInProgress = false;
-        prisonMaintenanceInProgress = false;
-    },
-    _setConfig: function(newConfig) {
-        config = newConfig;
-        // Re-process lists and booleans as updateConfigValues would
-        blackListRival = Array.isArray(config.blackListRival) ? config.blackListRival : (config.blackListRival ? config.blackListRival.split(',').map(name => name.trim()) : []);
-        whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : (config.whiteListMember ? config.whiteListMember.split(',').map(name => name.trim()) : []);
-        config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
-        config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
-        config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-        config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
-        config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
-        
-        // Initialize global timing states based on new config
-        globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime;
-        globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime;
-        globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime;
-        globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime;
-    },
-    _setFounderId: function(id) {
-        founderId = id;
-    },
-    _setPendingRivals: function(map) {
-        pendingRivals = map;
-    },
-    _setUserMap: function(map) {
-        userMap = map;
-    },
-    _setActiveConnection: function(conn) {
-        activeConnection = conn;
-    },
-    _setMonitoringMode: function(mode) {
-        monitoringMode = mode;
-    },
-    _setIsOddReconnectAttempt: function(val) {
-        isOddReconnectAttempt = val;
-    }
-};
