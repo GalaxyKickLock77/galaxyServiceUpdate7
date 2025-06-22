@@ -41,6 +41,7 @@ let currentConnectionPromise = null; // New global variable to track ongoing con
 let pendingRivals = new Map(); // Stores {name: {id, connection, mode}} for rivals detected in a short window
 let rivalProcessingTimeout = null; // Timeout for debouncing rival actions
 let founderIds = new Set(); // Stores IDs of founders to be skipped
+let isProcessingRivalAction = false; // New flag to prevent new rival processing during an ongoing action
 
 // Connection pool settings
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -1202,6 +1203,7 @@ function processPendingRivals() {
 
             if (rivalToActOn && rivalConnection && rivalConnection.state === CONNECTION_STATES.READY) {
                 console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}, Coordinate: ${rivalToActOn.coordinate}) from ${rivalMode} mode.`);
+                isProcessingRivalAction = true; // Set flag before processing
                 handleRivals([rivalToActOn], rivalMode, rivalConnection);
             } else {
                 console.log(`No matching rivals found in pending list or connection not ready.`);
@@ -1297,7 +1299,7 @@ function parse353(message, connection) {
         }
     }
     
-    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY) {
+    if (detectedRivals.length > 0 && connection.state === CONNECTION_STATES.READY && !isProcessingRivalAction) { // Check new flag
         console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')}`);
         detectedRivals.forEach(rival => {
             if (!pendingRivals.has(rival.name)) {
@@ -1308,6 +1310,8 @@ function parse353(message, connection) {
             }
         });
         processPendingRivals();
+    } else if (isProcessingRivalAction) {
+        console.log(`Skipping 353 processing: Rival action already in progress.`);
     }
 }
 
@@ -1339,13 +1343,15 @@ function handleJoinCommand(parts, connection) {
             }
             
             // Add to pending rivals and process
-            if (!pendingRivals.has(name)) {
+            if (!pendingRivals.has(name) && !isProcessingRivalAction) { // Check new flag
                 console.log(`DEBUG: Adding rival ${name} to pending list with coordinate: ${coordinate}`);
                 pendingRivals.set(name, { id: id, connection: connection, mode: 'attack', coordinate: coordinate }); // Pass coordinate
                 console.log(`Added rival ${name} to pending list from JOIN command.`);
                 console.log(`DEBUG: pendingRivals after set (JOIN):`, pendingRivals.get(name)); // New log
+                processPendingRivals();
+            } else if (isProcessingRivalAction) {
+                console.log(`Skipping JOIN processing for ${name}: Rival action already in progress.`);
             }
-            processPendingRivals();
         } else if (isWhiteListMember) {
             console.log(`WhiteListMember ${name} joined [${connection.botId}] - No action taken.`);
             // You can add specific actions for whiteListMember here if needed
@@ -1569,6 +1575,8 @@ async function handleRivals(rivals, mode, connection) {
         console.error("Failed to get new connection after rival handling:", error.message || error);
         // Removed tryReconnectWithBackoff as per user's request.
         // Now, if getConnection fails, it will simply log the error.
+    } finally {
+        isProcessingRivalAction = false; // Reset flag after rival handling is complete
     }
     // Timing increment will now be handled by the 850 error message if applicable, or by the new connection's initialization.
 }
