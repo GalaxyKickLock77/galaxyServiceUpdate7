@@ -17,7 +17,7 @@ process.on('SIGUSR2', () => {
 const POOL_MIN_SIZE = 1;
 const POOL_MAX_SIZE = 1;
 const POOL_TARGET_SIZE = 1;
-const POOL_HEALTH_CHECK_INTERVAL = 10000; // 10 seconds for frequent checks
+const POOL_HEALTH_CHECK_INTERVAL = 15000; // 10 seconds for frequent checks
 const CONNECTION_MAX_AGE = 10 * 60 * 1000; // 2 minutes
 const CONNECTION_IDLE_TIMEOUT = 1 * 60 * 1000; // 1 minute
 
@@ -627,6 +627,7 @@ function createConnection() {
         cleanupResolve: null,
         cleanupPromise: null,
         lastActionCommand: null, // Track last action command
+        lastMoveCommandTime: 0, // New property to track last move command time
         attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         
@@ -1177,26 +1178,30 @@ function processPendingRivals() {
         clearTimeout(rivalProcessingTimeout);
     }
     rivalProcessingTimeout = setTimeout(() => {
+        //console.log(`DEBUG: Current pendingRivals map at start of processing:`, Array.from(pendingRivals.entries())); // New log
         if (pendingRivals.size > 0) {
             console.log(`Processing ${pendingRivals.size} pending rivals.`);
             let rivalToActOn = null;
             let rivalConnection = null;
             let rivalMode = null;
+            let rivalCoordinate = null; // New variable to store coordinate
 
             // Iterate through pendingRivals to find the first one that matches criteria
             for (const [name, data] of pendingRivals.entries()) {
+                //console.log(`DEBUG: Processing pending rival ${name}, data:`, data); // Add this line
                 // If kickAllToggle is true, any rival added to pendingRivals is considered valid.
                 // Otherwise, only rivals in blackListRival are considered.
                 if (config.kickAllToggle || blackListRival.includes(name)) {
-                    rivalToActOn = { name: name, id: data.id };
+                    rivalToActOn = { name: name, id: data.id, coordinate: data.coordinate }; // Include coordinate
                     rivalConnection = data.connection;
                     rivalMode = data.mode;
+                    rivalCoordinate = data.coordinate; // Store coordinate
                     break; // Found a rival to act on, exit loop
                 }
             }
 
             if (rivalToActOn && rivalConnection && rivalConnection.state === CONNECTION_STATES.READY) {
-                console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}) from ${rivalMode} mode.`);
+                console.log(`🎯 Found matching rival in pending list: ${rivalToActOn.name} (ID: ${rivalToActOn.id}, Coordinate: ${rivalToActOn.coordinate}) from ${rivalMode} mode.`);
                 handleRivals([rivalToActOn], rivalMode, rivalConnection);
             } else {
                 console.log(`No matching rivals found in pending list or connection not ready.`);
@@ -1275,11 +1280,8 @@ function parse353(message, connection) {
             const isConsideredRival = !isWhiteListMember && (name !== connection.nick) && !founderIds.has(id) && (config.kickAllToggle || isBlackListRival);
 
             if (isConsideredRival) {
-                detectedRivals.push({ name, id });
-                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id} (kickAllToggle: ${config.kickAllToggle}, whiteListMember: ${isWhiteListMember}, self: ${name === connection.nick}, founder: ${founderIds.has(id)})`);
-                
+                let coordinate = null;
                 if (config.standOnEnemy) {
-                    let coordinate = null;
                     for (let j = i + 1; j < tokens.length; j++) {
                         if (tokens[j] === '@' && j + 5 < tokens.length && /^\d+$/.test(tokens[j + 5])) {
                             coordinate = tokens[j + 5];
@@ -1287,11 +1289,9 @@ function parse353(message, connection) {
                             break;
                         }
                     }
-                    if (coordinate && connection.state === CONNECTION_STATES.READY) {
-                        console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
-                        connection.send(`REMOVE ${coordinate}`);
-                    }
                 }
+                detectedRivals.push({ name, id, coordinate }); // Add coordinate to detectedRivals
+                console.log(`✅ Detected rival [${connection.botId}]: ${name} with ID ${id} (kickAllToggle: ${config.kickAllToggle}, whiteListMember: ${isWhiteListMember}, self: ${name === connection.nick}, founder: ${founderIds.has(id)})`);
             }
             i++;
         }
@@ -1301,8 +1301,10 @@ function parse353(message, connection) {
         console.log(`Detected rivals in 353 [${connection.botId}]: ${detectedRivals.map(r => r.name).join(', ')}`);
         detectedRivals.forEach(rival => {
             if (!pendingRivals.has(rival.name)) {
-                pendingRivals.set(rival.name, { id: rival.id, connection: connection, mode: 'defence' });
+                console.log(`DEBUG: Adding rival ${rival.name} to pending list with coordinate: ${rival.coordinate}`);
+                pendingRivals.set(rival.name, { id: rival.id, connection: connection, mode: 'defence', coordinate: rival.coordinate }); // Pass coordinate
                 console.log(`Added rival ${rival.name} to pending list from 353 message.`);
+                console.log(`DEBUG: pendingRivals after set (353):`, pendingRivals.get(rival.name)); // New log
             }
         });
         processPendingRivals();
@@ -1334,16 +1336,14 @@ function handleJoinCommand(parts, connection) {
                         break;
                     }
                 }
-                if (coordinate && connection.state === CONNECTION_STATES.READY) {
-                    console.log(`Sending REMOVE ${coordinate} for rival ${name} [${connection.botId}]`);
-                    connection.send(`REMOVE ${coordinate}`);
-                }
             }
             
             // Add to pending rivals and process
             if (!pendingRivals.has(name)) {
-                pendingRivals.set(name, { id: id, connection: connection, mode: 'attack' });
+                console.log(`DEBUG: Adding rival ${name} to pending list with coordinate: ${coordinate}`);
+                pendingRivals.set(name, { id: id, connection: connection, mode: 'attack', coordinate: coordinate }); // Pass coordinate
                 console.log(`Added rival ${name} to pending list from JOIN command.`);
+                console.log(`DEBUG: pendingRivals after set (JOIN):`, pendingRivals.get(name)); // New log
             }
             processPendingRivals();
         } else if (isWhiteListMember) {
@@ -1484,7 +1484,8 @@ async function handleRivals(rivals, mode, connection) {
     
     monitoringMode = false;
     
-    const ACTION_DELAY = 300; // Minimum delay between actions in ms
+    const ACTION_DELAY = 300; // Fixed delay between ACTION 29 and ACTION 3
+
     // Select only one detected rival
     const targetRival = rivals[0];
     
@@ -1495,32 +1496,41 @@ async function handleRivals(rivals, mode, connection) {
 
     const id = userMap[targetRival.name];
     if (id) {
-        if (config.actionOnEnemy && connection.lastActionCommand) {
-            const firstActionTime = Math.max(0, waitTime - ACTION_DELAY);
-            await new Promise(resolve => {
-                setTimeout(() => {
-                    console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) at ${firstActionTime}ms [${connection.botId}]`);
-                    connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
-                    setTimeout(() => {
-                        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) at ${waitTime}ms [${connection.botId}]`);
-                        connection.send(`ACTION 3 ${id}`);
-                        resolve();
-                    }, ACTION_DELAY);
-                }, firstActionTime);
-            });
-        } else {
-            // If actionOnEnemy is false or no lastActionCommand, just send ACTION 3 after waitTime
-            await new Promise(resolve => {
-                setTimeout(() => {
-                    console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) with ${waitTime}ms delay [${connection.botId}]`);
-                    connection.send(`ACTION 3 ${id}`);
-                    resolve();
-                }, waitTime);
-            });
+        // Calculate the delay before ACTION 29 based on the total waitTime
+        const delayBeforeAction29 = Math.max(0, waitTime - ACTION_DELAY);
+
+        // 1. Handle REMOVE if standOnEnemy is true and coordinate is available
+        if (config.standOnEnemy && targetRival.coordinate) {
+            console.log(`Sending REMOVE ${targetRival.coordinate} for rival ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
+            connection.send(`REMOVE ${targetRival.coordinate}`);
+            connection.lastMoveCommandTime = Date.now(); // Update last move command time
+        } else if (config.standOnEnemy && !targetRival.coordinate) {
+            console.warn(`Config standOnEnemy is true, but no coordinate found for rival ${targetRival.name} for REMOVE command.`);
         }
+
+        // Wait for the calculated delay before executing ACTION 29
+        console.log(`Waiting ${delayBeforeAction29}ms before executing ACTION 29.`);
+        await new Promise(resolve => setTimeout(resolve, delayBeforeAction29));
+
+        // 2. Handle first ACTION (ACTION 29) if actionOnEnemy is true and lastActionCommand is available
+        if (config.actionOnEnemy && connection.lastActionCommand) {
+            console.log(`Sending ACTION ${connection.lastActionCommand} to ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
+            connection.send(`ACTION ${connection.lastActionCommand} ${id}`);
+            connection.lastMoveCommandTime = Date.now(); // Update last move command time
+        }
+        
+        // Wait for ACTION_DELAY before executing ACTION 3
+        console.log(`Waiting ${ACTION_DELAY}ms before executing ACTION 3.`);
+        await new Promise(resolve => setTimeout(resolve, ACTION_DELAY));
+
+        // 3. Handle second ACTION (ACTION 3)
+        console.log(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
+        connection.send(`ACTION 3 ${id}`);
+        connection.lastMoveCommandTime = Date.now(); // Update last move command time
+
     } else {
         console.log(`Could not find ID for target rival ${targetRival.name}, skipping actions.`);
-        return; // Added return here to prevent further execution if no ID
+        return;
     }
     
     // Introduce a very short delay to allow for immediate server responses (like 850 errors)
@@ -1551,7 +1561,7 @@ async function handleRivals(rivals, mode, connection) {
             await getConnection(true, true); // Keep skipCloseTimeCheck true for this specific scenario
         } else {
             // This block remains as is, using a fixed 500ms delay
-            await new Promise(resolve => setTimeout(resolve, 50));
+            await new Promise(resolve => setTimeout(resolve, 1000));
             await getConnection(true, true);
         }
         console.timeEnd(reconnectTimerLabel); // Use the unique label
