@@ -944,6 +944,7 @@ function createConnection() {
                                     if (activeConnection === this) {
                                         activeConnection = null;
                                     }
+                                    isProcessingRivalAction = false; // Ensure flag is reset before new connection
                                     
                                     console.log(`⚡ Connection closed, using dedicated prison connection for relogin`);
                                     try {
