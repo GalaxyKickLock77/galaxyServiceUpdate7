@@ -965,29 +965,35 @@ function createConnection() {
                         }
                         break;
                     case "850":
-                        if (payload.includes("3 секунд(ы)")) {
+                        if (payload.includes("3 секунд(ы)") || payload.includes("Нельзя")) {
                             appLog(`⚡ 3-second rule detected. Immediate QUIT and re-evaluation.`);
                             this.send("QUIT :ds");
                             await this.cleanup(); // Ensure connection is fully closed
-                            if (activeConnection === this) {
-                                activeConnection = null;
-                            }
+                             if (activeConnection === this) {
+                                 activeConnection = null;
+                             }
                             // Now proceed with the original 850 handling logic for timing adjustment and reconnection
-                            appLog(`850 error detected in mode: ${currentMode}`);
+                            appLog(`3s notification detected in mode: ${currentMode}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
                                 const newTiming = incrementTiming(currentMode, this, '3second');
                                 appLog(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
                             } else {
-                                appLog(`850 error but no active mode, current mode: ${currentMode}`);
+                                appLog(`3s notification but no active mode, current mode: ${currentMode}`);
                             }
                             // Trigger reconnection after handling the 850 error
-                            Promise.resolve().then(() => getConnection(true, true).catch(err => appLog(`Failed after 850 error:`, err)));
+                           // Promise.resolve().then(() => getConnection(true, true).catch(err => appLog(`Failed after 850 error:`, err)));
                             return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
-                            appLog(`850 error (non-3second) in mode: ${currentMode} - ${payload}`);
+                            this.send("QUIT :ds");
+                            await this.cleanup(); // Ensure connection is fully closed
+                             if (activeConnection === this) {
+                                 activeConnection = null;
+                             }
+                            appLog(`⚡⚡KICKED Rival in mode: ${currentMode} - ${payload}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
-                                const newTiming = incrementTiming(currentMode, this, 'general_error');
+                                const newTiming = incrementTiming(currentMode, this, 'success');
                                 appLog(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
+                                
                             }
                         }
                         break;
@@ -1456,7 +1462,7 @@ async function handleRivals(rivals, mode, connection) {
         //    appLog(`Config standOnEnemy is true, but no coordinate found for rival ${targetRival.name} for REMOVE command.`);
         }
         // 3. Handle second ACTION (ACTION 3)
-    //    appLog(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
+        appLog(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
         connection.send(`ACTION 3 ${id}`);
         connection.lastMoveCommandTime = Date.now(); // Update last move command time
 
