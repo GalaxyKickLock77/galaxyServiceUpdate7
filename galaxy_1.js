@@ -9,33 +9,54 @@ const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
 const LOG_FILE_PATH = 'galaxy_1.log';
 const LOG_FILE_MAX_SIZE_BYTES = 1024 * 1024; // 1 MB
-const LOG_CLEANUP_INTERVAL_MS = 30 * 1000; // 20 seconds
+const LOG_CLEANUP_INTERVAL_MS = 30 * 1000; // 30 seconds
 
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 
-async function appLog(message, ...args) {
-    const timestamp = new Date().toISOString();
-    const logMessage = `[${timestamp}] ${message} ${args.map(arg => JSON.stringify(arg)).join(' ')}\n`;
+const logQueue = [];
+let logWriteInProgress = false;
+
+async function processLogQueue() {
+    if (logWriteInProgress || logQueue.length === 0) {
+        return;
+    }
+
+    logWriteInProgress = true;
+    const messagesToWrite = logQueue.splice(0, logQueue.length); // Get all current messages
+    const logContent = messagesToWrite.join('');
+
     try {
-        await fs.appendFile(LOG_FILE_PATH, logMessage);
+        await fs.appendFile(LOG_FILE_PATH, logContent);
     } catch (err) {
         originalConsoleError(`Failed to write to log file: ${err.message}`);
+    } finally {
+        logWriteInProgress = false;
     }
+}
+
+function appLog(message, ...args) {
+    const timestamp = new Date().toISOString();
+    const logMessage = `[${timestamp}] ${message} ${args.map(arg => JSON.stringify(arg)).join(' ')}\n`;
+    logQueue.push(logMessage);
     originalConsoleLog(message, ...args); // Also log to console
+    // Trigger processing immediately, but it will be debounced by processLogQueue's flag
+    processLogQueue();
 }
 
 async function cleanUpLogFile() {
     try {
         // Always truncate the log file to 0 bytes
         await fs.truncate(LOG_FILE_PATH, 0);
-        //appLog(`Log file ${LOG_FILE_PATH} truncated.`);
+        // appLog(`Log file ${LOG_FILE_PATH} truncated.`); // Use original console.log to avoid recursion
+        originalConsoleLog(`[${new Date().toISOString()}] Log file ${LOG_FILE_PATH} truncated.`);
     } catch (err) {
         if (err.code === 'ENOENT') {
             // File does not exist, no need to clean up, but create it if it doesn't exist
             try {
                 await fs.writeFile(LOG_FILE_PATH, '');
-                appLog(`Log file ${LOG_FILE_PATH} created.`);
+                // appLog(`Log file ${LOG_FILE_PATH} created.`); // Use original console.log to avoid recursion
+                originalConsoleLog(`[${new Date().toISOString()}] Log file ${LOG_FILE_PATH} created.`);
             } catch (writeErr) {
                 originalConsoleError(`Error creating log file: ${writeErr.message}`);
             }
