@@ -8,6 +8,9 @@ const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 
 const LOG_FILE_PATH = 'galaxy_1.log';
+const LOG_FILE_MAX_SIZE_BYTES = 1024 * 1024; // 1 MB
+const LOG_CLEANUP_INTERVAL_MS = 30 * 1000; // 20 seconds
+
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 
@@ -20,6 +23,26 @@ async function appLog(message, ...args) {
         originalConsoleError(`Failed to write to log file: ${err.message}`);
     }
     originalConsoleLog(message, ...args); // Also log to console
+}
+
+async function cleanUpLogFile() {
+    try {
+        // Always truncate the log file to 0 bytes
+        await fs.truncate(LOG_FILE_PATH, 0);
+        //appLog(`Log file ${LOG_FILE_PATH} truncated.`);
+    } catch (err) {
+        if (err.code === 'ENOENT') {
+            // File does not exist, no need to clean up, but create it if it doesn't exist
+            try {
+                await fs.writeFile(LOG_FILE_PATH, '');
+                appLog(`Log file ${LOG_FILE_PATH} created.`);
+            } catch (writeErr) {
+                originalConsoleError(`Error creating log file: ${writeErr.message}`);
+            }
+        } else {
+            originalConsoleError(`Error during log file cleanup: ${err.message}`);
+        }
+    }
 }
 
 // Handle PM2 signals for config reload
@@ -1559,6 +1582,9 @@ setInterval(() => {
     const healthyPrison = prisonConnectionPool.filter(conn => conn.state === CONNECTION_STATES.HASH_RECEIVED && conn.registrationData).length;
 }, 30000);
 
+// Automatic log file cleanup
+const logCleanupIntervalId = setInterval(cleanUpLogFile, LOG_CLEANUP_INTERVAL_MS);
+
 // Removed global timing state logging as it's now per-connection
 
 async function recoverUser() {
@@ -1592,13 +1618,24 @@ async function maintainMonitoringConnection() {
 
 setInterval(maintainMonitoringConnection, 10000);
 
-recoverUser();
+// Ensure log file is cleaned up on startup
+(async () => {
+    await cleanUpLogFile();
+    recoverUser();
+})();
 
 process.on('SIGINT', async () => {
     appLog("Shutting down...");
+    // Clear the log cleanup interval to prevent new log writes
+    clearInterval(logCleanupIntervalId); // Assuming logCleanupIntervalId is the variable holding the interval ID
+
     await Promise.allSettled(connectionPool.map(conn => conn.cleanup(true)));
     if (activeConnection) await Promise.resolve(activeConnection.cleanup(true));
-    process.exit(0);
+
+    // Add a small delay to allow any pending appLog writes to complete
+    setTimeout(() => {
+        process.exit(0);
+    }, 500); // 500ms delay
 });
 
 process.on('uncaughtException', async (error) => {

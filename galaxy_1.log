@@ -1,0 +1,11 @@
+[2025-06-25T13:51:09.792Z] Log file galaxy_1.log truncated. 
+[2025-06-25T13:51:09.792Z] Starting recovery with alternating RCs 
+[2025-06-25T13:51:09.797Z] Creating new connection instance with RC1: onfoqk2ff1 
+[2025-06-25T13:51:11.941Z] connection reached state 
+[2025-06-25T13:51:12.134Z] connection reached state 
+[2025-06-25T13:51:12.728Z] 🚀 Optimized connection initialized 
+[2025-06-25T13:51:13.430Z] ✅ Detected rival [54531773]: ``THALA`` with ID 14358744 (kickAllToggle: true, whiteListMember: false, self: false, owner: false) 
+[2025-06-25T13:51:13.490Z] Skipping founder ``THALA`` (ID: 14358744) from pending rivals list. 
+[2025-06-25T13:51:13.491Z] No matching rivals found in pending list or connection not ready. 
+[2025-06-25T13:51:26.537Z] Shutting down... 
+[2025-06-25T13:51:27.218Z] Active connection closed 
