@@ -183,7 +183,7 @@ function updateConfigValues() {
             try {
                 configData = JSON.parse(configRaw);
             } catch (parseError) {
-                appLog("Error parsing config JSON:", parseError);
+              //  appLog("Error parsing config JSON:", parseError);
                 throw parseError;
             }
             
@@ -588,7 +588,7 @@ async function getConnection(activateFromPool = true, skipCloseTimeCheck = false
                 Promise.resolve().then(() => optimizedConnectionPoolMaintenance().catch(err => appLog("Error in post-creation maintenance:", err)));
                 resolve(newConn);
             } catch (error) {
-                appLog("Failed to create new connection:", error.message || error);
+               // appLog("Failed to create new connection:", error.message || error);
                 await newConn.cleanup();
                 reject(error);
             } finally {
@@ -612,7 +612,7 @@ async function getMonitoringConnection() {
 function createConnection() {
     const rcKey = getNextRC();
     const rcValue = config[rcKey];
-    appLog(`Creating new connection instance with ${rcKey}: ${rcValue}`);
+   appLog(`Creating new connection instance with ${rcKey}: ${rcValue}`);
     const conn = {
         socket: null,
         state: CONNECTION_STATES.CLOSED,
@@ -720,7 +720,7 @@ function createConnection() {
                         }
                     });
                 } catch (err) {
-                    appLog("Error during connection initialization:", err);
+                //    appLog("Error during connection initialization:", err);
                     clearTimeout(this.connectionTimeout);
                     this.authenticating = false;
                     reject(err);
@@ -791,7 +791,7 @@ function createConnection() {
                                                }, 200); // 200ms delay for AI chat response
                                             })
                                             .catch(error => {
-                                                appLog(`AI Chat Error: ${error.message}`);
+                                            //    appLog(`AI Chat Error: ${error.message}`);
                                             });
                                     }
                                 }
@@ -864,7 +864,7 @@ function createConnection() {
                             const kickedUserId = parts[commandIndex + 2];
                             const isReleasedFromPrison = message.toLowerCase().includes("released") || message.toLowerCase().includes("освободили");
                             if (isReleasedFromPrison) {
-                                appLog(`🎉 Bot ${this.botId} was released from prison, executing parallel release process...`);
+                                appLog(`🎉 Bot ${this.botId} was released from prison, executing release process...`);
                                 
                                 const parallelTasks = [];
                                 
@@ -952,9 +952,9 @@ function createConnection() {
                                         originalConsoleLog('prisonRelogin'); // Keep console.timeEnd for performance measurement
                                         appLog(`✅ Fast prison relogin completed`);
                                     } catch (error) {
-                                        appLog("Failed to get prison connection:", error.message || error);
+                                      //  appLog("Failed to get prison connection:", error.message || error);
                                         await getConnection(true).catch(retryError => {
-                                            appLog("Prison relogin fallback failed:", retryError.message || retryError);
+                                          //  appLog("Prison relogin fallback failed:", retryError.message || retryError);
                                         });
                                     }
                                 });
@@ -1010,7 +1010,7 @@ function createConnection() {
                         break;
                     case "850":
                         if (payload.includes("3 секунд(ы)") || payload.includes("Нельзя")) {
-                            appLog(`⚡ 3-second rule detected. Immediate QUIT and re-evaluation.`);
+                            appLog(`⚡ 3-second rule detected. Immediate Exit and re-evaluation.`);
                             this.send("QUIT :ds");
                             await this.cleanup(); // Ensure connection is fully closed
                              if (activeConnection === this) {
@@ -1036,7 +1036,7 @@ function createConnection() {
                             appLog(`⚡⚡KICKED Rival in mode: ${currentMode} - ${payload}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
                                 const newTiming = incrementTiming(currentMode, this, 'success');
-                                appLog(`Adjusted ${currentMode} timing due to general error: ${newTiming}ms`);
+                                appLog(`Adjusted ${currentMode} timing due to kick: ${newTiming}ms`);
                                 
                             }
                         }
@@ -1168,7 +1168,7 @@ function createConnection() {
                     this.socket = null;
                     this.authenticating = false;
                 } catch (err) {
-                    appLog(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
+                //    appLog(`Error in cleanup [${this.botId || 'connecting'}]:`, err);
                     resolve(); // Resolve even on error to avoid hanging
                 }
             });
@@ -1193,7 +1193,7 @@ function processPendingRivals() {
             for (const [name, data] of pendingRivals.entries()) {
                 // Re-check if the user is a founder before considering them a rival
                 if (founderIds.has(data.id)) {
-                    appLog(`Skipping founder ${name} (ID: ${data.id}) from pending rivals list.`);
+                    appLog(`Skipping owner ${name} (ID: ${data.id}) from pending rivals list.`);
                     continue; // Skip this entry if it's a founder
                 }
 
@@ -1410,11 +1410,11 @@ async function performJailFreeFast(connection) {
             let data = '';
             res.on('data', (chunk) => data += chunk);
             res.on('end', () => {
-                appLog(`Jail free response for ${userID}:`, data);
+            //    appLog(`Jail free response for ${userID}:`, data);
                 resolve(data);
             });
             res.on('error', (error) => {
-                appLog(`Response error for ${userID}:`, error);
+            //    appLog(`Response error for ${userID}:`, error);
                 reject(error);
             });
         });
@@ -1424,7 +1424,7 @@ async function performJailFreeFast(connection) {
             reject(error);
         });
         req.on('timeout', () => {
-            appLog(`Request timeout for ${userID}`);
+        //    appLog(`Request timeout for ${userID}`);
             req.destroy();
             reject(new Error('Request timeout'));
         });
@@ -1445,7 +1445,7 @@ async function performJailFreeWithRetry(connection, maxRetries = 10, retryDelay 
             appLog(`✅ Jail free succeeded on attempt ${attempt} for ${userID}`);
             return result;
         } catch (error) {
-            appLog(`❌ Jail free attempt ${attempt}/${maxRetries} failed for ${userID}:`, error.message);
+        //    appLog(`❌ Jail free attempt ${attempt}/${maxRetries} failed for ${userID}:`, error.message);
             if (attempt < maxRetries) {
                 const delay = retryDelay * attempt;
                 appLog(`⏳ Retrying jail free in ${delay}ms...`);
@@ -1506,7 +1506,7 @@ async function handleRivals(rivals, mode, connection) {
         //    appLog(`Config standOnEnemy is true, but no coordinate found for rival ${targetRival.name} for REMOVE command.`);
         }
         // 3. Handle second ACTION (ACTION 3)
-        appLog(`Sending ACTION 3 to ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
+        appLog(`Trying to Prison ${targetRival.name} (ID: ${id}) [${connection.botId}]`);
         connection.send(`ACTION 3 ${id}`);
         connection.lastMoveCommandTime = Date.now(); // Update last move command time
 
@@ -1545,7 +1545,7 @@ async function handleRivals(rivals, mode, connection) {
         }
         originalConsoleLog(reconnectTimerLabel); // Keep console.timeEnd for performance measurement
     } catch (error) {
-        appLog("Failed to get new connection after rival handling:", error.message || error);
+    //    appLog("Failed to get new connection after rival handling:", error.message || error);
         // Removed tryReconnectWithBackoff as per user's request.
         // Now, if getConnection fails, it will simply log the error.
     } finally {
@@ -1564,7 +1564,7 @@ async function handlePrisonAutomation(connection) {
     try {
         connection.prisonState = 'JOINING_PRISON_CHANNEL';
         appLog(`🔒 Starting prison automation for connection ${connection.botId}`);
-        appLog(`🔒 Joining prison channel for ${connection.botId}...`);
+    //    appLog(`🔒 Joining prison channel for ${connection.botId}...`);
         connection.send(`JOIN`);
         
         if (connection.prisonState === 'JOINING_PRISON_CHANNEL') {
@@ -1572,13 +1572,13 @@ async function handlePrisonAutomation(connection) {
             connection.prisonState = 'WAITING_FOR_BROWSER_MESSAGE';
             connection.send(`ACTION 29 ${connection.botId}`);
             connection.prisonTimeout = setTimeout(() => {
-                appLog(`Prison automation timed out for connection ${connection.botId}`);
+            //    appLog(`Prison automation timed out for connection ${connection.botId}`);
                 connection.prisonState = 'IDLE';
                 connection.prisonTimeout = null;
             }, 3000);
         }
     } catch (error) {
-        appLog(`Error during prison automation for connection ${connection.botId}:`, error);
+    //    appLog(`Error during prison automation for connection ${connection.botId}:`, error);
         connection.prisonState = 'IDLE';
         if (connection.prisonTimeout) clearTimeout(connection.prisonTimeout);
     }
@@ -1615,7 +1615,7 @@ async function recoverUser() {
         await getMonitoringConnection();
     //    appLog("Initial monitoring connection established successfully");
     } catch (error) {
-        appLog("Failed to establish initial monitoring connection:", error.message || error);
+     //   appLog("Failed to establish initial monitoring connection:", error.message || error);
         setTimeout(recoverUser, 500);
     }
 }
@@ -1631,7 +1631,7 @@ async function maintainMonitoringConnection() {
         try {
             await getMonitoringConnection();
         } catch (error) {
-            appLog("Failed to maintain monitoring connection:", error.message || error);
+        //    appLog("Failed to maintain monitoring connection:", error.message || error);
             setTimeout(maintainMonitoringConnection, 1000);
         }
     }
@@ -1672,7 +1672,7 @@ process.on('uncaughtException', async (error) => {
 });
 
 process.on('unhandledRejection', async (reason, promise) => {
-    appLog('Unhandled Rejection at:', promise, 'reason:', reason);
+ //   appLog('Unhandled Rejection at:', promise, 'reason:', reason);
     if (activeConnection) {
         await activeConnection.cleanup();
         activeConnection = null;
