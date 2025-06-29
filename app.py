@@ -338,6 +338,176 @@ def quick_status():
     
     return jsonify(status), 200
 
+@app.route('/log/galaxy_1.log', methods=['GET'])
+def stream_galaxy_1_log():
+    """Streams the content of galaxy_1.log, including new lines as they are written."""
+    log_file_path = os.path.join(GALAXY_BACKEND_PATH, 'galaxy_1.log')
+
+    def generate():
+        f = None
+        try:
+            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+            # Send existing content
+            yield f.read()
+            
+            # Continuously stream new content
+            while True:
+                current_size = os.path.getsize(log_file_path)
+                if current_size < f.tell(): # File was truncated
+                    f.close()
+                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
+                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
+                else:
+                    new_content = f.read()
+                    if new_content:
+                        yield new_content
+                time.sleep(1) # Check for new content every second
+        except FileNotFoundError:
+            yield "Log file not found."
+        except Exception as e:
+            yield f"Error reading log file: {e}"
+        finally:
+            if f:
+                f.close()
+
+    return app.response_class(generate(), mimetype='text/plain')
+
+@app.route('/log/galaxy_2.log', methods=['GET'])
+def stream_galaxy_2_log():
+    """Streams the content of galaxy_2.log, including new lines as they are written."""
+    log_file_path = os.path.join(GALAXY_BACKEND_PATH, 'galaxy_2.log')
+
+    def generate():
+        f = None
+        try:
+            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+            # Send existing content
+            yield f.read()
+            
+            # Continuously stream new content
+            while True:
+                current_size = os.path.getsize(log_file_path)
+                if current_size < f.tell(): # File was truncated
+                    f.close()
+                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
+                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
+                else:
+                    new_content = f.read()
+                    if new_content:
+                        yield new_content
+                time.sleep(1) # Check for new content every second
+        except FileNotFoundError:
+            yield "Log file not found."
+        except Exception as e:
+            yield f"Error reading log file: {e}"
+        finally:
+            if f:
+                f.close()
+
+    return app.response_class(generate(), mimetype='text/plain')
+
+@app.route('/log/galaxy_3.log', methods=['GET'])
+def stream_galaxy_3_log():
+    """Streams the content of galaxy_3.log, including new lines as they are written."""
+    log_file_path = os.path.join(GALAXY_BACKEND_PATH, 'galaxy_3.log')
+
+    def generate():
+        f = None
+        try:
+            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+            # Send existing content
+            yield f.read()
+            
+            # Continuously stream new content
+            while True:
+                current_size = os.path.getsize(log_file_path)
+                if current_size < f.tell(): # File was truncated
+                    f.close()
+                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
+                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
+                else:
+                    new_content = f.read()
+                    if new_content:
+                        yield new_content
+                time.sleep(1) # Check for new content every second
+        except FileNotFoundError:
+            yield "Log file not found."
+        except Exception as e:
+            yield f"Error reading log file: {e}"
+        finally:
+            if f:
+                f.close()
+
+    return app.response_class(generate(), mimetype='text/plain')
+
+@app.route('/log/galaxy_4.log', methods=['GET'])
+def stream_galaxy_4_log():
+    """Streams the content of galaxy_4.log, including new lines as they are written."""
+    log_file_path = os.path.join(GALAXY_BACKEND_PATH, 'galaxy_4.log')
+
+    def generate():
+        f = None
+        try:
+            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+            # Send existing content
+            yield f.read()
+            
+            # Continuously stream new content
+            while True:
+                current_size = os.path.getsize(log_file_path)
+                if current_size < f.tell(): # File was truncated
+                    f.close()
+                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
+                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
+                else:
+                    new_content = f.read()
+                    if new_content:
+                        yield new_content
+                time.sleep(1) # Check for new content every second
+        except FileNotFoundError:
+            yield "Log file not found."
+        except Exception as e:
+            yield f"Error reading log file: {e}"
+        finally:
+            if f:
+                f.close()
+
+    return app.response_class(generate(), mimetype='text/plain')
+
+@app.route('/log/galaxy_5.log', methods=['GET'])
+def stream_galaxy_5_log():
+    """Streams the content of galaxy_5.log, including new lines as they are written."""
+    log_file_path = os.path.join(GALAXY_BACKEND_PATH, 'galaxy_5.log')
+
+    def generate():
+        f = None
+        try:
+            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+            # Send existing content
+            yield f.read()
+            
+            # Continuously stream new content
+            while True:
+                current_size = os.path.getsize(log_file_path)
+                if current_size < f.tell(): # File was truncated
+                    f.close()
+                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
+                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
+                else:
+                    new_content = f.read()
+                    if new_content:
+                        yield new_content
+                time.sleep(1) # Check for new content every second
+        except FileNotFoundError:
+            yield "Log file not found."
+        except Exception as e:
+            yield f"Error reading log file: {e}"
+        finally:
+            if f:
+                f.close()
+
+    return app.response_class(generate(), mimetype='text/plain')
+
 def cleanup_on_exit():
     """Fast exit cleanup"""
     print("🧹 Fast cleanup...")
