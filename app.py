@@ -34,6 +34,8 @@ status_cache = {"time": 0, "data": {}}
 active_connections = {}
 connection_lock = Lock()
 response_cache = {}
+# Store configs for when galaxy services connect
+pending_configs = {}
 
 def string_to_bool(value):
     """Lightning-fast boolean conversion"""
@@ -169,6 +171,19 @@ def handle_galaxy_connect(data):
     form_number = data.get('form_number', 1)
     with connection_lock:
         active_connections[form_number] = request.sid
+        
+        # Send pending config immediately if available
+        if form_number in pending_configs:
+            config = pending_configs[form_number]
+            response_id = f"connect_config_{form_number}_{int(time.time() * 1000)}"
+            socketio.emit('config_update', {
+                'config': config,
+                'response_id': response_id,
+                'form_number': form_number
+            }, room=request.sid)
+            print(f"Sent pending config to Galaxy_{form_number} immediately")
+            # Keep config for future updates
+        
     print(f"Galaxy_{form_number} connected via WebSocket: {request.sid}")
     emit('connection_confirmed', {'form_number': form_number, 'status': 'connected'})
 
@@ -239,6 +254,10 @@ def start_galaxy(form_number):
                 "RC2_defenceIntervalTime": int(data.get(f'RC2_defenceIntervalTime{form_number}', 5))
             })
         
+        # Store config for when galaxy service connects
+        with connection_lock:
+            pending_configs[form_number] = config
+        
         script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
         if not os.path.exists(script_path):
             return jsonify({"error": f"Script missing: galaxy_{form_number}.js"}), 404
@@ -249,25 +268,32 @@ def start_galaxy(form_number):
                     # Kill existing first
                     nuclear_kill(form_number)
                     
-                    # Start process without config file dependency
-                    cmd = ['pm2', 'start', script_path, '--name', f'galaxy_{form_number}']
-                    proc = subprocess.Popen(cmd, cwd=GALAXY_BACKEND_PATH, 
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    galaxy_processes[form_number] = proc
+                    # Start galaxy_X.js with PM2
+                    cmd = ['pm2', 'start', script_path, '--name', f'galaxy_{form_number}', '--no-autorestart']
+                    result = subprocess.run(cmd, cwd=GALAXY_BACKEND_PATH, 
+                                          capture_output=True, text=True, timeout=10)
                     
-                    # Send initial config via WebSocket after process starts
-                    def send_initial_config():
-                        time.sleep(3)  # Wait for galaxy service to connect
-                        with connection_lock:
-                            if form_number in active_connections:
-                                response_id = f"start_config_{form_number}_{int(time.time() * 1000)}"
-                                socketio.emit('config_update', {
-                                    'config': config,
-                                    'response_id': response_id,
-                                    'form_number': form_number
-                                }, room=active_connections[form_number])
-                    
-                    executor.submit(send_initial_config)
+                    if result.returncode == 0:
+                        print(f"Galaxy_{form_number} started successfully")
+                        
+                        # Send initial config via WebSocket after process starts
+                        def send_initial_config():
+                            time.sleep(5)  # Wait for galaxy service to connect
+                            with connection_lock:
+                                if form_number in active_connections:
+                                    response_id = f"start_config_{form_number}_{int(time.time() * 1000)}"
+                                    socketio.emit('config_update', {
+                                        'config': config,
+                                        'response_id': response_id,
+                                        'form_number': form_number
+                                    }, room=active_connections[form_number])
+                                    print(f"Initial config sent to Galaxy_{form_number}")
+                                else:
+                                    print(f"Galaxy_{form_number} not connected to WebSocket yet")
+                        
+                        executor.submit(send_initial_config)
+                    else:
+                        print(f"Failed to start Galaxy_{form_number}: {result.stderr}")
                     
             except Exception as e:
                 print(f"Start error {form_number}: {e}")
@@ -345,8 +371,10 @@ def update_galaxy(form_number):
                 "RC2_defenceIntervalTime": int(data.get(f'RC2_defenceIntervalTime{form_number}', 5))
             })
         
-        # Try WebSocket first
+        # Store config for future connections
         with connection_lock:
+            pending_configs[form_number] = config
+            
             if form_number in active_connections:
                 response_id = f"config_{form_number}_{int(time.time() * 1000)}"
                 
