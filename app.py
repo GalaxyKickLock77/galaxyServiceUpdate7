@@ -201,13 +201,43 @@ def handle_disconnect():
 
 @app.route('/start/<int:form_number>', methods=['POST'])
 def start_galaxy(form_number):
-    """Instant start response"""
+    """Start galaxy with WebSocket config"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
         data = request.json or {}
-        write_config_instant(data, form_number)
+        
+        # Build config object same as update endpoint
+        config = {
+            "RC1": data.get(f'RC1{form_number}', ''),
+            "RC2": data.get(f'RC2{form_number}', ''),
+            "RC1_startAttackTime": int(data.get(f'RC1_startAttackTime{form_number}', 1870)),
+            "RC1_stopAttackTime": int(data.get(f'RC1_stopAttackTime{form_number}', 1900)),
+            "RC1_attackIntervalTime": int(data.get(f'RC1_attackIntervalTime{form_number}', 5)),
+            "RC1_startDefenceTime": int(data.get(f'RC1_startDefenceTime{form_number}', 1870)),
+            "RC1_stopDefenceTime": int(data.get(f'RC1_stopDefenceTime{form_number}', 1900)),
+            "RC1_defenceIntervalTime": int(data.get(f'RC1_defenceIntervalTime{form_number}', 5)),
+            "planetName": data.get(f'PlanetName{form_number}', ''),
+            "blackListRival": data.get(f'blackListRival{form_number}', []),
+            "whiteListMember": data.get(f'whiteListMember{form_number}', []),
+            "kickAllToggle": string_to_bool(data.get(f'kickAllToggle{form_number}', True)),
+            "standOnEnemy": string_to_bool(data.get(f'standOnEnemy{form_number}', True)),
+            "actionOnEnemy": string_to_bool(data.get(f'actionOnEnemy{form_number}', False)),
+            "aiChatToggle": string_to_bool(data.get(f'aiChatToggle{form_number}', False)),
+            "dualRCToggle": string_to_bool(data.get(f'dualRCToggle{form_number}', True)),
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        if config['dualRCToggle']:
+            config.update({
+                "RC2_startAttackTime": int(data.get(f'RC2_startAttackTime{form_number}', 1875)),
+                "RC2_stopAttackTime": int(data.get(f'RC2_stopAttackTime{form_number}', 1900)),
+                "RC2_attackIntervalTime": int(data.get(f'RC2_attackIntervalTime{form_number}', 5)),
+                "RC2_startDefenceTime": int(data.get(f'RC2_startDefenceTime{form_number}', 1850)),
+                "RC2_stopDefenceTime": int(data.get(f'RC2_stopDefenceTime{form_number}', 1925)),
+                "RC2_defenceIntervalTime": int(data.get(f'RC2_defenceIntervalTime{form_number}', 5))
+            })
         
         script_path = os.path.join(GALAXY_BACKEND_PATH, f'galaxy_{form_number}.js')
         if not os.path.exists(script_path):
@@ -219,30 +249,25 @@ def start_galaxy(form_number):
                     # Kill existing first
                     nuclear_kill(form_number)
                     
-                    # Build command
-                    cmd = ['pm2', 'start', script_path, '--name', f'galaxy_{form_number}', '--']
-                    
-                    # Add args efficiently
-                    arg_map = {
-                        'RC1': 'RC1', 'RC2': 'RC2', 'startAttackTime': 'startAttackTime',
-                        'stopAttackTime': 'stopAttackTime', 'attackIntervalTime': 'attackIntervalTime',
-                        'startDefenceTime': 'startDefenceTime', 'stopDefenceTime': 'stopDefenceTime',
-                        'defenceIntervalTime': 'defenceIntervalTime', 'PlanetName': 'planetName',
-                        'blackListRival': 'blackListRival', 'whiteListMember': 'whiteListMember',
-                        'kickAllToggle': 'kickAllToggle', 'standOnEnemy': 'standOnEnemy',
-                        'actionOnEnemy': 'actionOnEnemy', 'aiChatToggle': 'aiChatToggle',
-                        'dualRCToggle': 'dualRCToggle'
-                    }
-                    
-                    for key, val in data.items():
-                        base_key = key.rstrip('12345')
-                        if base_key in arg_map:
-                            cmd.extend([f'--{arg_map[base_key]}', str(val)])
-                    
-                    # Start process
+                    # Start process without config file dependency
+                    cmd = ['pm2', 'start', script_path, '--name', f'galaxy_{form_number}']
                     proc = subprocess.Popen(cmd, cwd=GALAXY_BACKEND_PATH, 
                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     galaxy_processes[form_number] = proc
+                    
+                    # Send initial config via WebSocket after process starts
+                    def send_initial_config():
+                        time.sleep(3)  # Wait for galaxy service to connect
+                        with connection_lock:
+                            if form_number in active_connections:
+                                response_id = f"start_config_{form_number}_{int(time.time() * 1000)}"
+                                socketio.emit('config_update', {
+                                    'config': config,
+                                    'response_id': response_id,
+                                    'form_number': form_number
+                                }, room=active_connections[form_number])
+                    
+                    executor.submit(send_initial_config)
                     
             except Exception as e:
                 print(f"Start error {form_number}: {e}")
@@ -250,7 +275,7 @@ def start_galaxy(form_number):
         executor.submit(start_bg)
         
         return jsonify({
-            "message": f"Galaxy_{form_number} launching...",
+            "message": f"Galaxy_{form_number} launching with WebSocket config...",
             "status": "starting",
             "form": form_number,
             "timestamp": int(time.time())
