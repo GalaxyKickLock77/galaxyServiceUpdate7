@@ -8,7 +8,7 @@ const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 const io = require('socket.io-client');
 
-const LOG_FILE_PATH = 'galaxy_1.log';
+const LOG_FILE_PATH = 'galaxy_2.log';
 const LOG_FILE_MAX_SIZE_BYTES = 1024 * 1024; // 1 MB
 const LOG_CLEANUP_INTERVAL_MS = 30 * 1000; // 30 seconds
 
