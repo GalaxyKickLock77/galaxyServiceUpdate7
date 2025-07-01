@@ -176,16 +176,16 @@ function updateConfigValues(newConfig = null) {
     if (newConfig) {
         // Update from WebSocket
         config = newConfig;
-        appLog(`Config updated via WebSocket: ${JSON.stringify(Object.keys(config))}`);
+    //    appLog(`Config updated via WebSocket: ${JSON.stringify(Object.keys(config))}`);
     } else {
         // Fallback to file-based config if WebSocket not available
         try {
             delete require.cache[require.resolve('./config1.json')];
             const configRaw = fsSync.readFileSync('./config1.json', 'utf8');
             config = JSON.parse(configRaw);
-            appLog("Config loaded from file (fallback)");
+        //    appLog("Config loaded from file (fallback)");
         } catch (error) {
-            appLog("Failed to load config from file:", error);
+        //    appLog("Failed to load config from file:", error);
             return;
         }
     }
@@ -221,11 +221,11 @@ function updateConfigValues(newConfig = null) {
 // Initialize WebSocket connection to Flask API
 function connectToAPI() {
     if (apiSocket && apiSocket.connected) {
-        appLog("Already connected to Flask API WebSocket");
+    //    appLog("Already connected to Flask API WebSocket");
         return;
     }
     
-    appLog("Connecting to Flask API via WebSocket at http://127.0.0.1:7860...");
+   // appLog("Connecting to Flask API via WebSocket at http://127.0.0.1:7860...");
     
     try {
         apiSocket = io('http://127.0.0.1:7860', {
@@ -237,13 +237,13 @@ function connectToAPI() {
             forceNew: true
         });
     } catch (error) {
-        appLog("Error creating socket.io client:", error.message);
+     //   appLog("Error creating socket.io client:", error.message);
         return;
     }
     
     apiSocket.on('connect', () => {
         isConnectedToAPI = true;
-        appLog(`Connected to Flask API WebSocket`);
+       // appLog(`Connected to Flask API WebSocket`);
         
         // Register this galaxy instance
         apiSocket.emit('galaxy_connect', {
@@ -253,11 +253,11 @@ function connectToAPI() {
     });
     
     apiSocket.on('connection_confirmed', (data) => {
-        appLog(`Connection confirmed for form ${data.form_number}`);
+       // appLog(`Connection confirmed for form ${data.form_number}`);
     });
     
     apiSocket.on('config_update', (data) => {
-        appLog(`Received config update via WebSocket`);
+       // appLog(`Received config update via WebSocket`);
         updateConfigValues(data.config);
         
         // Send response back to API
@@ -274,21 +274,21 @@ function connectToAPI() {
     
     apiSocket.on('disconnect', () => {
         isConnectedToAPI = false;
-        appLog("Disconnected from Flask API WebSocket");
+      //  appLog("Disconnected from Flask API WebSocket");
     });
     
     apiSocket.on('connect_error', (error) => {
         isConnectedToAPI = false;
-        appLog("WebSocket connection error:", error.message || error);
-        appLog("Make sure Flask API is running on port 7860");
+       // appLog("WebSocket connection error:", error.message || error);
+       // appLog("Make sure Flask API is running on port 7860");
     });
     
     apiSocket.on('reconnect_error', (error) => {
-        appLog("WebSocket reconnection error:", error.message || error);
+      //  appLog("WebSocket reconnection error:", error.message || error);
     });
     
     apiSocket.on('error', (error) => {
-        appLog("WebSocket general error:", error.message || error);
+      //  appLog("WebSocket general error:", error.message || error);
     });
 }
 
@@ -309,7 +309,7 @@ setInterval(() => {
             
             if (mtime > configLastModified) {
                 configLastModified = mtime;
-                appLog(`Config change detected via file polling (WebSocket fallback)`);
+            //    appLog(`Config change detected via file polling (WebSocket fallback)`);
                 updateConfigValues();
             }
         } catch (err) {

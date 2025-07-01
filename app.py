@@ -433,30 +433,61 @@ def stream_galaxy_1_log():
 
     def generate():
         f = None
-        try:
-            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
-            # Send existing content
-            yield f.read()
-            
-            # Continuously stream new content
-            while True:
-                current_size = os.path.getsize(log_file_path)
-                if current_size < f.tell(): # File was truncated
-                    f.close()
-                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
-                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
-                else:
-                    new_content = f.read()
-                    if new_content:
-                        yield new_content
-                time.sleep(1) # Check for new content every second
-        except FileNotFoundError:
-            yield "Log file not found."
-        except Exception as e:
-            yield f"Error reading log file: {e}"
-        finally:
-            if f:
-                f.close()
+        last_position = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if not os.path.exists(log_file_path):
+                    yield "Log file not found. Waiting...\n"
+                    time.sleep(2)
+                    continue
+                    
+                f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                f.seek(last_position)
+                
+                # Send existing content from last position
+                content = f.read()
+                if content:
+                    yield content
+                    last_position = f.tell()
+                
+                # Continuously stream new content
+                while True:
+                    try:
+                        current_size = os.path.getsize(log_file_path)
+                        if current_size < last_position:  # File was truncated
+                            f.close()
+                            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                            yield "---FILE-TRUNCATED---\n"
+                            content = f.read()
+                            if content:
+                                yield content
+                            last_position = f.tell()
+                        else:
+                            new_content = f.read()
+                            if new_content:
+                                yield new_content
+                                last_position = f.tell()
+                        time.sleep(0.5)  # Faster polling
+                    except (IOError, OSError) as e:
+                        yield f"\n[Stream interrupted: {e}. Reconnecting...]\n"
+                        break  # Break inner loop to retry
+                        
+            except Exception as e:
+                retry_count += 1
+                yield f"\n[Error: {e}. Retry {retry_count}/{max_retries}]\n"
+                time.sleep(1)
+            finally:
+                if f:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    f = None
+        
+        yield "\n[Max retries exceeded. Stream ended.]\n"
 
     return app.response_class(generate(), mimetype='text/plain')
 
@@ -467,30 +498,61 @@ def stream_galaxy_2_log():
 
     def generate():
         f = None
-        try:
-            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
-            # Send existing content
-            yield f.read()
-            
-            # Continuously stream new content
-            while True:
-                current_size = os.path.getsize(log_file_path)
-                if current_size < f.tell(): # File was truncated
-                    f.close()
-                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
-                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
-                else:
-                    new_content = f.read()
-                    if new_content:
-                        yield new_content
-                time.sleep(1) # Check for new content every second
-        except FileNotFoundError:
-            yield "Log file not found."
-        except Exception as e:
-            yield f"Error reading log file: {e}"
-        finally:
-            if f:
-                f.close()
+        last_position = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if not os.path.exists(log_file_path):
+                    yield "Log file not found. Waiting...\n"
+                    time.sleep(2)
+                    continue
+                    
+                f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                f.seek(last_position)
+                
+                # Send existing content from last position
+                content = f.read()
+                if content:
+                    yield content
+                    last_position = f.tell()
+                
+                # Continuously stream new content
+                while True:
+                    try:
+                        current_size = os.path.getsize(log_file_path)
+                        if current_size < last_position:  # File was truncated
+                            f.close()
+                            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                            yield "---FILE-TRUNCATED---\n"
+                            content = f.read()
+                            if content:
+                                yield content
+                            last_position = f.tell()
+                        else:
+                            new_content = f.read()
+                            if new_content:
+                                yield new_content
+                                last_position = f.tell()
+                        time.sleep(0.5)  # Faster polling
+                    except (IOError, OSError) as e:
+                        yield f"\n[Stream interrupted: {e}. Reconnecting...]\n"
+                        break  # Break inner loop to retry
+                        
+            except Exception as e:
+                retry_count += 1
+                yield f"\n[Error: {e}. Retry {retry_count}/{max_retries}]\n"
+                time.sleep(1)
+            finally:
+                if f:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    f = None
+        
+        yield "\n[Max retries exceeded. Stream ended.]\n"
 
     return app.response_class(generate(), mimetype='text/plain')
 
@@ -501,30 +563,61 @@ def stream_galaxy_3_log():
 
     def generate():
         f = None
-        try:
-            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
-            # Send existing content
-            yield f.read()
-            
-            # Continuously stream new content
-            while True:
-                current_size = os.path.getsize(log_file_path)
-                if current_size < f.tell(): # File was truncated
-                    f.close()
-                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
-                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
-                else:
-                    new_content = f.read()
-                    if new_content:
-                        yield new_content
-                time.sleep(1) # Check for new content every second
-        except FileNotFoundError:
-            yield "Log file not found."
-        except Exception as e:
-            yield f"Error reading log file: {e}"
-        finally:
-            if f:
-                f.close()
+        last_position = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if not os.path.exists(log_file_path):
+                    yield "Log file not found. Waiting...\n"
+                    time.sleep(2)
+                    continue
+                    
+                f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                f.seek(last_position)
+                
+                # Send existing content from last position
+                content = f.read()
+                if content:
+                    yield content
+                    last_position = f.tell()
+                
+                # Continuously stream new content
+                while True:
+                    try:
+                        current_size = os.path.getsize(log_file_path)
+                        if current_size < last_position:  # File was truncated
+                            f.close()
+                            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                            yield "---FILE-TRUNCATED---\n"
+                            content = f.read()
+                            if content:
+                                yield content
+                            last_position = f.tell()
+                        else:
+                            new_content = f.read()
+                            if new_content:
+                                yield new_content
+                                last_position = f.tell()
+                        time.sleep(0.5)  # Faster polling
+                    except (IOError, OSError) as e:
+                        yield f"\n[Stream interrupted: {e}. Reconnecting...]\n"
+                        break  # Break inner loop to retry
+                        
+            except Exception as e:
+                retry_count += 1
+                yield f"\n[Error: {e}. Retry {retry_count}/{max_retries}]\n"
+                time.sleep(1)
+            finally:
+                if f:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    f = None
+        
+        yield "\n[Max retries exceeded. Stream ended.]\n"
 
     return app.response_class(generate(), mimetype='text/plain')
 
@@ -535,30 +628,61 @@ def stream_galaxy_4_log():
 
     def generate():
         f = None
-        try:
-            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
-            # Send existing content
-            yield f.read()
-            
-            # Continuously stream new content
-            while True:
-                current_size = os.path.getsize(log_file_path)
-                if current_size < f.tell(): # File was truncated
-                    f.close()
-                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
-                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
-                else:
-                    new_content = f.read()
-                    if new_content:
-                        yield new_content
-                time.sleep(1) # Check for new content every second
-        except FileNotFoundError:
-            yield "Log file not found."
-        except Exception as e:
-            yield f"Error reading log file: {e}"
-        finally:
-            if f:
-                f.close()
+        last_position = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if not os.path.exists(log_file_path):
+                    yield "Log file not found. Waiting...\n"
+                    time.sleep(2)
+                    continue
+                    
+                f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                f.seek(last_position)
+                
+                # Send existing content from last position
+                content = f.read()
+                if content:
+                    yield content
+                    last_position = f.tell()
+                
+                # Continuously stream new content
+                while True:
+                    try:
+                        current_size = os.path.getsize(log_file_path)
+                        if current_size < last_position:  # File was truncated
+                            f.close()
+                            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                            yield "---FILE-TRUNCATED---\n"
+                            content = f.read()
+                            if content:
+                                yield content
+                            last_position = f.tell()
+                        else:
+                            new_content = f.read()
+                            if new_content:
+                                yield new_content
+                                last_position = f.tell()
+                        time.sleep(0.5)  # Faster polling
+                    except (IOError, OSError) as e:
+                        yield f"\n[Stream interrupted: {e}. Reconnecting...]\n"
+                        break  # Break inner loop to retry
+                        
+            except Exception as e:
+                retry_count += 1
+                yield f"\n[Error: {e}. Retry {retry_count}/{max_retries}]\n"
+                time.sleep(1)
+            finally:
+                if f:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    f = None
+        
+        yield "\n[Max retries exceeded. Stream ended.]\n"
 
     return app.response_class(generate(), mimetype='text/plain')
 
@@ -569,30 +693,61 @@ def stream_galaxy_5_log():
 
     def generate():
         f = None
-        try:
-            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
-            # Send existing content
-            yield f.read()
-            
-            # Continuously stream new content
-            while True:
-                current_size = os.path.getsize(log_file_path)
-                if current_size < f.tell(): # File was truncated
-                    f.close()
-                    f = open(log_file_path, 'r', encoding='utf-8', errors='ignore') # Re-open from beginning
-                    yield "---FILE-TRUNCATED---\n" + f.read() # Send marker and then all current content
-                else:
-                    new_content = f.read()
-                    if new_content:
-                        yield new_content
-                time.sleep(1) # Check for new content every second
-        except FileNotFoundError:
-            yield "Log file not found."
-        except Exception as e:
-            yield f"Error reading log file: {e}"
-        finally:
-            if f:
-                f.close()
+        last_position = 0
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                if not os.path.exists(log_file_path):
+                    yield "Log file not found. Waiting...\n"
+                    time.sleep(2)
+                    continue
+                    
+                f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                f.seek(last_position)
+                
+                # Send existing content from last position
+                content = f.read()
+                if content:
+                    yield content
+                    last_position = f.tell()
+                
+                # Continuously stream new content
+                while True:
+                    try:
+                        current_size = os.path.getsize(log_file_path)
+                        if current_size < last_position:  # File was truncated
+                            f.close()
+                            f = open(log_file_path, 'r', encoding='utf-8', errors='ignore')
+                            yield "---FILE-TRUNCATED---\n"
+                            content = f.read()
+                            if content:
+                                yield content
+                            last_position = f.tell()
+                        else:
+                            new_content = f.read()
+                            if new_content:
+                                yield new_content
+                                last_position = f.tell()
+                        time.sleep(0.5)  # Faster polling
+                    except (IOError, OSError) as e:
+                        yield f"\n[Stream interrupted: {e}. Reconnecting...]\n"
+                        break  # Break inner loop to retry
+                        
+            except Exception as e:
+                retry_count += 1
+                yield f"\n[Error: {e}. Retry {retry_count}/{max_retries}]\n"
+                time.sleep(1)
+            finally:
+                if f:
+                    try:
+                        f.close()
+                    except:
+                        pass
+                    f = None
+        
+        yield "\n[Max retries exceeded. Stream ended.]\n"
 
     return app.response_class(generate(), mimetype='text/plain')
 
