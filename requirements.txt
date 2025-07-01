@@ -4,3 +4,7 @@ autopep8
 
 # App
 flask
+flask-cors
+flask-socketio
+python-socketio
+eventlet

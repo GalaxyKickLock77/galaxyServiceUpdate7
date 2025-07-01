@@ -8,9 +8,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from flask_cors import CORS
 import signal
 import time
+from flask_socketio import SocketIO, emit
+import asyncio
+from threading import Lock
 
 app = Flask(__name__)
 CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Configuration
 GALAXY_BACKEND_PATH = "/galaxybackend"
@@ -25,6 +29,11 @@ process_lock = threading.RLock()
 # Ultra-fast caching
 config_cache = {}
 status_cache = {"time": 0, "data": {}}
+
+# WebSocket connections tracking
+active_connections = {}
+connection_lock = Lock()
+response_cache = {}
 
 def string_to_bool(value):
     """Lightning-fast boolean conversion"""
@@ -154,6 +163,42 @@ def nuclear_kill(form_number):
     
     return killed_pids
 
+@socketio.on('galaxy_connect')
+def handle_galaxy_connect(data):
+    """Handle galaxy_1.js WebSocket connection"""
+    form_number = data.get('form_number', 1)
+    with connection_lock:
+        active_connections[form_number] = request.sid
+    print(f"Galaxy_{form_number} connected via WebSocket: {request.sid}")
+    emit('connection_confirmed', {'form_number': form_number, 'status': 'connected'})
+
+@socketio.on('galaxy_response')
+def handle_galaxy_response(data):
+    """Handle responses from galaxy_1.js"""
+    form_number = data.get('form_number')
+    response_id = data.get('response_id')
+    response_data = data.get('response')
+    
+    if response_id:
+        response_cache[response_id] = {
+            'data': response_data,
+            'timestamp': time.time(),
+            'form_number': form_number
+        }
+    print(f"Received response from Galaxy_{form_number}: {response_data}")
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """Handle WebSocket disconnection"""
+    with connection_lock:
+        for form_num, sid in list(active_connections.items()):
+            if sid == request.sid:
+                del active_connections[form_num]
+                print(f"Galaxy_{form_num} disconnected")
+                break
+
+
+
 @app.route('/start/<int:form_number>', methods=['POST'])
 def start_galaxy(form_number):
     """Instant start response"""
@@ -237,37 +282,86 @@ def stop_galaxy(form_number):
 
 @app.route('/update/<int:form_number>', methods=['POST'])
 def update_galaxy(form_number):
-    """Instant config update with PM2 notification"""
+    """WebSocket config update with fallback to file"""
     if form_number not in range(1, 6):
         return jsonify({"error": "Invalid form number"}), 400
     
     try:
         data = request.json or {}
-        config = write_config_instant(data, form_number)
         
-        # Try to notify the PM2 process about the config change
+        # Build config object
+        config = {
+            "RC1": data.get(f'RC1{form_number}', ''),
+            "RC2": data.get(f'RC2{form_number}', ''),
+            "RC1_startAttackTime": int(data.get(f'RC1_startAttackTime{form_number}', 1870)),
+            "RC1_stopAttackTime": int(data.get(f'RC1_stopAttackTime{form_number}', 1900)),
+            "RC1_attackIntervalTime": int(data.get(f'RC1_attackIntervalTime{form_number}', 5)),
+            "RC1_startDefenceTime": int(data.get(f'RC1_startDefenceTime{form_number}', 1870)),
+            "RC1_stopDefenceTime": int(data.get(f'RC1_stopDefenceTime{form_number}', 1900)),
+            "RC1_defenceIntervalTime": int(data.get(f'RC1_defenceIntervalTime{form_number}', 5)),
+            "planetName": data.get(f'PlanetName{form_number}', ''),
+            "blackListRival": data.get(f'blackListRival{form_number}', []),
+            "whiteListMember": data.get(f'whiteListMember{form_number}', []),
+            "kickAllToggle": string_to_bool(data.get(f'kickAllToggle{form_number}', True)),
+            "standOnEnemy": string_to_bool(data.get(f'standOnEnemy{form_number}', True)),
+            "actionOnEnemy": string_to_bool(data.get(f'actionOnEnemy{form_number}', False)),
+            "aiChatToggle": string_to_bool(data.get(f'aiChatToggle{form_number}', False)),
+            "dualRCToggle": string_to_bool(data.get(f'dualRCToggle{form_number}', True)),
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        if config['dualRCToggle']:
+            config.update({
+                "RC2_startAttackTime": int(data.get(f'RC2_startAttackTime{form_number}', 1875)),
+                "RC2_stopAttackTime": int(data.get(f'RC2_stopAttackTime{form_number}', 1900)),
+                "RC2_attackIntervalTime": int(data.get(f'RC2_attackIntervalTime{form_number}', 5)),
+                "RC2_startDefenceTime": int(data.get(f'RC2_startDefenceTime{form_number}', 1850)),
+                "RC2_stopDefenceTime": int(data.get(f'RC2_stopDefenceTime{form_number}', 1925)),
+                "RC2_defenceIntervalTime": int(data.get(f'RC2_defenceIntervalTime{form_number}', 5))
+            })
+        
+        # Try WebSocket first
+        with connection_lock:
+            if form_number in active_connections:
+                response_id = f"config_{form_number}_{int(time.time() * 1000)}"
+                
+                socketio.emit('config_update', {
+                    'config': config,
+                    'response_id': response_id,
+                    'form_number': form_number
+                }, room=active_connections[form_number])
+                
+                # Wait for response
+                start_time = time.time()
+                while time.time() - start_time < 2:
+                    if response_id in response_cache:
+                        response = response_cache.pop(response_id)
+                        return jsonify({
+                            "message": f"Galaxy_{form_number} config updated via WebSocket",
+                            "status": "updated",
+                            "method": "websocket",
+                            "form": form_number,
+                            "response": response['data'],
+                            "timestamp": int(time.time())
+                        }), 200
+                    time.sleep(0.01)
+        
+        # Fallback to file-based update
+        config_file = write_config_instant(data, form_number)
+        
         try:
-            # Option 1: Send a signal to the process
             subprocess.run(['pm2', 'sendSignal', 'SIGUSR2', f'galaxy_{form_number}'], 
                           timeout=1, capture_output=True)
-            
-            # Option 2: Touch the config file again to ensure timestamp changes
-            config_path = os.path.join(GALAXY_BACKEND_PATH, f'config{form_number}.json')
-            current_time = time.time()
-            os.utime(config_path, (current_time, current_time))
-            
-            # Option 3: Restart the process if needed (uncomment if other methods fail)
-            # subprocess.run(['pm2', 'restart', f'galaxy_{form_number}'], 
-            #              timeout=2, capture_output=True)
         except Exception as notify_error:
             print(f"PM2 notification error (non-critical): {notify_error}")
         
         return jsonify({
-            "message": f"Galaxy_{form_number} config updated",
+            "message": f"Galaxy_{form_number} config updated via file (WebSocket unavailable)",
             "status": "updated",
+            "method": "file",
             "form": form_number,
             "timestamp": int(time.time()),
-            "config_keys": list(config.keys())
+            "config_keys": list(config_file.keys())
         }), 200
         
     except Exception as e:
@@ -527,8 +621,9 @@ if __name__ == '__main__':
         print(f"❌ Backend path not found: {GALAXY_BACKEND_PATH}")
         exit(1)
     
-    print("🚀 ULTRA-FAST Galaxy API")
+    print("🚀 ULTRA-FAST Galaxy API with WebSocket")
     print(f"📁 Path: {GALAXY_BACKEND_PATH}")
-    print("⚡ Zero-delay responses enabled!")
+    print("⚡ Zero-delay responses + Real-time WebSocket enabled!")
+    print("🔌 WebSocket endpoint: ws://localhost:7860/socket.io/")
     
-    app.run(host='0.0.0.0', port=7860, debug=False, threaded=True)
+    socketio.run(app, host='0.0.0.0', port=7860, debug=False, allow_unsafe_werkzeug=True)
