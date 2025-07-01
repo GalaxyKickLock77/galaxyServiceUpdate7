@@ -67,7 +67,10 @@ async function cleanUpLogFile() {
     }
 }
 
-// PM2 signals not needed - WebSocket only
+// Handle PM2 signals for config reload
+process.on('SIGUSR2', () => {
+    updateConfigValues();
+});
 
 // Optimized Connection Pool Settings
 const POOL_MIN_SIZE = 1;
@@ -102,19 +105,7 @@ let isProcessingRivalAction = false;
 // WebSocket connection to Flask API
 let apiSocket = null;
 let isConnectedToAPI = false;
-
-// Determine form number from script name or process arguments
-let FORM_NUMBER = 1;
-try {
-    const scriptName = process.argv[1] || __filename;
-    const match = scriptName.match(/galaxy_(\d+)\.js/);
-    if (match) {
-        FORM_NUMBER = parseInt(match[1]);
-    }
-} catch (error) {
-    appLog("Could not determine form number, defaulting to 1:", error.message);
-}
-appLog(`Galaxy instance form number: ${FORM_NUMBER}`);
+const FORM_NUMBER = 1; // This should be set based on which galaxy instance this is
 
 // Connection pool settings
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -187,32 +178,16 @@ function updateConfigValues(newConfig = null) {
         config = newConfig;
         appLog(`Config updated via WebSocket: ${JSON.stringify(Object.keys(config))}`);
     } else {
-        // Set default config if no WebSocket config available
-        config = {
-            RC1: '',
-            RC2: '',
-            RC1_startAttackTime: 1870,
-            RC1_stopAttackTime: 1900,
-            RC1_attackIntervalTime: 5,
-            RC1_startDefenceTime: 1870,
-            RC1_stopDefenceTime: 1900,
-            RC1_defenceIntervalTime: 5,
-            RC2_startAttackTime: 1875,
-            RC2_stopAttackTime: 1900,
-            RC2_attackIntervalTime: 5,
-            RC2_startDefenceTime: 1850,
-            RC2_stopDefenceTime: 1925,
-            RC2_defenceIntervalTime: 5,
-            planetName: '',
-            blackListRival: [],
-            whiteListMember: [],
-            kickAllToggle: true,
-            standOnEnemy: true,
-            actionOnEnemy: false,
-            aiChatToggle: false,
-            dualRCToggle: true
-        };
-        appLog("Using default config (waiting for WebSocket)");
+        // Fallback to file-based config if WebSocket not available
+        try {
+            delete require.cache[require.resolve('./config1.json')];
+            const configRaw = fsSync.readFileSync('./config1.json', 'utf8');
+            config = JSON.parse(configRaw);
+            appLog("Config loaded from file (fallback)");
+        } catch (error) {
+            appLog("Failed to load config from file:", error);
+            return;
+        }
     }
     
     // Process arrays and booleans
@@ -321,7 +296,27 @@ function connectToAPI() {
 updateConfigValues(); // Load from file initially
 connectToAPI();
 
-// No file watching needed - WebSocket only
+// Fallback file watching (only used if WebSocket is not available)
+let configLastModified = 0;
+const configPath = './config1.json';
+
+// Only use file watching as fallback when WebSocket is disconnected
+setInterval(() => {
+    if (!isConnectedToAPI) {
+        try {
+            const stats = fsSync.statSync(configPath);
+            const mtime = stats.mtimeMs;
+            
+            if (mtime > configLastModified) {
+                configLastModified = mtime;
+                appLog(`Config change detected via file polling (WebSocket fallback)`);
+                updateConfigValues();
+            }
+        } catch (err) {
+            // File doesn't exist or can't be read
+        }
+    }
+}, 1000); // Check every second when WebSocket is down
 
 // Reconnect to API if connection is lost
 setInterval(() => {
