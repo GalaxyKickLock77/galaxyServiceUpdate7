@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Flask and Flask-CORS
-RUN pip3 install flask flask-cors
+RUN pip3 install flask flask-cors flask_socketio
 
 # Copy your application files into the container
 COPY package*.json ./

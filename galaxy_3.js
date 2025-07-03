@@ -6,6 +6,7 @@ const path = require('path');
 const https = require('https');
 const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
+const io = require('socket.io-client');
 
 const LOG_FILE_PATH = 'galaxy_3.log';
 const LOG_FILE_MAX_SIZE_BYTES = 1024 * 1024; // 1 MB
@@ -89,17 +90,22 @@ let poolMaintenanceInProgress = false;
 let prisonMaintenanceInProgress = false;
 let lastCloseTime = 0;
 // Configuration
-let config;
+let config = {};
 let blackListRival = [];
 let whiteListMember = [];
 let userMap = {};
-let isOddReconnectAttempt = true; // Controls the odd/even alternation for reconnection delays
+let isOddReconnectAttempt = true;
 let currentMode = null;
-let currentConnectionPromise = null; // New global variable to track ongoing connection attempts
-let pendingRivals = new Map(); // Stores {name: {id, connection, mode}} for rivals detected in a short window
-let rivalProcessingTimeout = null; // Timeout for debouncing rival actions
-let founderIds = new Set(); // Stores IDs of founders to be skipped
-let isProcessingRivalAction = false; // New flag to prevent new rival processing during an ongoing action
+let currentConnectionPromise = null;
+let pendingRivals = new Map();
+let rivalProcessingTimeout = null;
+let founderIds = new Set();
+let isProcessingRivalAction = false;
+
+// WebSocket connection to Flask API
+let apiSocket = null;
+let isConnectedToAPI = false;
+const FORM_NUMBER = 3; // This should be set based on which galaxy instance this is
 
 // Connection pool settings
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -166,136 +172,158 @@ function initializeTimingStates(connection) {
     };
 }
 
-function updateConfigValues() {
-    let retries = 0;
-    const maxRetries = 3;
-    const retryDelay = 50; // ms
-
-    function tryLoadConfig() {
+function updateConfigValues(newConfig = null) {
+    if (newConfig) {
+        // Update from WebSocket
+        config = newConfig;
+    //    appLog(`Config updated via WebSocket: ${JSON.stringify(Object.keys(config))}`);
+    } else {
+        // Fallback to file-based config if WebSocket not available
         try {
-            // Force Node.js to reload the config file from disk
             delete require.cache[require.resolve('./config3.json')];
-            
-            // Read the file directly first to ensure we're getting the latest version
             const configRaw = fsSync.readFileSync('./config3.json', 'utf8');
-            let configData;
-            
-            try {
-                configData = JSON.parse(configRaw);
-            } catch (parseError) {
-              //  appLog("Error parsing config JSON:", parseError);
-                throw parseError;
-            }
-            
-            // Update the config object
-            config = configData;
-            
-            // Process blackListRival and whiteListMember names
-            blackListRival = Array.isArray(config.blackListRival) ? config.blackListRival : config.blackListRival.split(',').map(name => name.trim());
-            whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : config.whiteListMember.split(',').map(name => name.trim());
-            
-            // Validate required fields
-            if (!config.RC1 || !config.RC2) {
-                throw new Error("Config must contain both RC1 and RC2");
-            }
-            
-            // Convert string booleans to actual booleans
-            config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
-            config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
-            config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-            config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
-            config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
-            
-            if (typeof config.actionOnEnemy === 'undefined') {
-                throw new Error("Config must contain actionOnEnemy");
-            }
-            
-            // Re-initialize timing states for all connections if needed
-            // Initialize global timing states for each RC if they haven't been set or if config changes
-            if (globalTimingState.RC1.attack.currentTime === null) {
-                globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime;
-                globalTimingState.RC1.attack.lastMode = null;
-                globalTimingState.RC1.attack.consecutiveErrors = 0;
-            }
-            if (globalTimingState.RC1.defense.currentTime === null) {
-                globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime;
-                globalTimingState.RC1.defense.lastMode = null;
-                globalTimingState.RC1.defense.consecutiveErrors = 0;
-            }
-            if (globalTimingState.RC2.attack.currentTime === null) {
-                globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime;
-                globalTimingState.RC2.attack.lastMode = null;
-                globalTimingState.RC2.attack.consecutiveErrors = 0;
-            }
-            if (globalTimingState.RC2.defense.currentTime === null) {
-                globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime;
-                globalTimingState.RC2.defense.lastMode = null;
-                globalTimingState.RC2.defense.consecutiveErrors = 0;
-            }
-
-            // Re-initialize timing states for all connections if needed
-            // This should now pull from the global state based on their rcKey
-            connectionPool.forEach(conn => {
-                initializeTimingStates(conn);
-            });
-            
-            if (activeConnection) {
-                initializeTimingStates(activeConnection);
-            }
+            config = JSON.parse(configRaw);
+        //    appLog("Config loaded from file (fallback)");
         } catch (error) {
-            if (retries < maxRetries) {
-                retries++;
-            //    appLog(`Retrying to load config (attempt ${retries}/${maxRetries})...`);
-                setTimeout(tryLoadConfig, retryDelay);
-            } else {
-            //    appLog("Failed to update config after retries:", error);
-            }
+        //    appLog("Failed to load config from file:", error);
+            return;
         }
     }
-
-    tryLoadConfig();
+    
+    // Process arrays and booleans
+    blackListRival = Array.isArray(config.blackListRival) ? config.blackListRival : 
+        (typeof config.blackListRival === 'string' ? config.blackListRival.split(',').map(name => name.trim()) : []);
+    whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : 
+        (typeof config.whiteListMember === 'string' ? config.whiteListMember.split(',').map(name => name.trim()) : []);
+    
+    // Convert booleans
+    config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
+    config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
+    config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
+    config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
+    config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
+    
+    // Initialize timing states
+    if (globalTimingState.RC1.attack.currentTime === null) {
+        globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime || 1870;
+        globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime || 1870;
+    }
+    if (globalTimingState.RC2.attack.currentTime === null) {
+        globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime || 1875;
+        globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime || 1850;
+    }
+    
+    // Re-initialize connection timing states
+    connectionPool.forEach(conn => initializeTimingStates(conn));
+    if (activeConnection) initializeTimingStates(activeConnection);
 }
-updateConfigValues();
 
-// More robust file watching with polling fallback for PM2 compatibility
+// Initialize WebSocket connection to Flask API
+function connectToAPI() {
+    if (apiSocket && apiSocket.connected) {
+    //    appLog("Already connected to Flask API WebSocket");
+        return;
+    }
+    
+   // appLog("Connecting to Flask API via WebSocket at http://127.0.0.1:7860...");
+    
+    try {
+        apiSocket = io('http://127.0.0.1:7860', {
+            transports: ['websocket'],
+            timeout: 5000,
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionAttempts: 10,
+            forceNew: true
+        });
+    } catch (error) {
+     //   appLog("Error creating socket.io client:", error.message);
+        return;
+    }
+    
+    apiSocket.on('connect', () => {
+        isConnectedToAPI = true;
+       // appLog(`Connected to Flask API WebSocket`);
+        
+        // Register this galaxy instance
+        apiSocket.emit('galaxy_connect', {
+            form_number: FORM_NUMBER,
+            timestamp: Date.now()
+        });
+    });
+    
+    apiSocket.on('connection_confirmed', (data) => {
+       // appLog(`Connection confirmed for form ${data.form_number}`);
+    });
+    
+    apiSocket.on('config_update', (data) => {
+       // appLog(`Received config update via WebSocket`);
+        updateConfigValues(data.config);
+        
+        // Send response back to API
+        apiSocket.emit('galaxy_response', {
+            form_number: FORM_NUMBER,
+            response_id: data.response_id,
+            response: {
+                status: 'config_applied',
+                timestamp: Date.now(),
+                config_keys: Object.keys(data.config)
+            }
+        });
+    });
+    
+    apiSocket.on('disconnect', () => {
+        isConnectedToAPI = false;
+      //  appLog("Disconnected from Flask API WebSocket");
+    });
+    
+    apiSocket.on('connect_error', (error) => {
+        isConnectedToAPI = false;
+       // appLog("WebSocket connection error:", error.message || error);
+       // appLog("Make sure Flask API is running on port 7860");
+    });
+    
+    apiSocket.on('reconnect_error', (error) => {
+      //  appLog("WebSocket reconnection error:", error.message || error);
+    });
+    
+    apiSocket.on('error', (error) => {
+      //  appLog("WebSocket general error:", error.message || error);
+    });
+}
+
+// Initialize with fallback config and connect to API
+updateConfigValues(); // Load from file initially
+connectToAPI();
+
+// Fallback file watching (only used if WebSocket is not available)
 let configLastModified = 0;
 const configPath = './config3.json';
 
-// Primary file watcher
-fsSync.watch(configPath, { persistent: true }, (eventType) => {
-    if (eventType === 'change') {
+// Only use file watching as fallback when WebSocket is disconnected
+setInterval(() => {
+    if (!isConnectedToAPI) {
         try {
             const stats = fsSync.statSync(configPath);
             const mtime = stats.mtimeMs;
             
-            // Only update if the file has actually changed (prevents duplicate updates)
             if (mtime > configLastModified) {
                 configLastModified = mtime;
-            //    appLog(`Config file changed (${new Date().toISOString()}), updating values...`);
+            //    appLog(`Config change detected via file polling (WebSocket fallback)`);
                 updateConfigValues();
             }
         } catch (err) {
-        //    appLog('Error checking config file stats:', err);
+            // File doesn't exist or can't be read
         }
     }
-});
+}, 1000); // Check every second when WebSocket is down
 
-// Fallback polling mechanism for PM2 environments where file watchers might be unreliable
-const CONFIG_POLL_INTERVAL = 50; // Check every 50 milliseconds for ultra-fast updates
+// Reconnect to API if connection is lost
 setInterval(() => {
-    try {
-        const stats = fsSync.statSync(configPath);
-        const mtime = stats.mtimeMs;
-        
-        if (mtime > configLastModified) {
-            configLastModified = mtime;
-        //    appLog(`Config change detected via polling (${new Date().toISOString()}), updating values...`);
-            updateConfigValues();
-        }
-    } catch (err) {
-    //    appLog('Error polling config file:', err);
+    if (!isConnectedToAPI) {
+        connectToAPI();
     }
-}, CONFIG_POLL_INTERVAL);
+}, 5000); // Try to reconnect every 5 seconds
 
 function genHash(code) {
     const hash = CryptoJS.MD5(code);
