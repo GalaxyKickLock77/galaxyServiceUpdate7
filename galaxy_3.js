@@ -484,12 +484,26 @@ const PRISON_CONNECTION_MAX_AGE = 1 * 60 * 1000;
 
 let globalTimingState = {
     RC1: {
-        attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 },
-        defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 }
+        currentTime: null,
+        lastMode: null,
+        consecutiveErrors: 0,
+        attack: {
+            currentTime: null
+        },
+        defense: {
+            currentTime: null
+        }
     },
     RC2: {
-        attack: { currentTime: null, lastMode: null, consecutiveErrors: 0 },
-        defense: { currentTime: null, lastMode: null, consecutiveErrors: 0 }
+        currentTime: null,
+        lastMode: null,
+        consecutiveErrors: 0,
+        attack: {
+            currentTime: null
+        },
+        defense: {
+            currentTime: null
+        }
     }
 };
 
@@ -619,16 +633,11 @@ function getNextRC() {
 
 function initializeTimingStates(connection) {
     const rcKey = connection.rcKey;
-    // Initialize connection's timing states from the global timing state for the specific RC
-    connection.attackTimingState = {
-        currentTime: globalTimingState[rcKey].attack.currentTime,
-        lastMode: globalTimingState[rcKey].attack.lastMode,
-        consecutiveErrors: globalTimingState[rcKey].attack.consecutiveErrors
-    };
-    connection.defenseTimingState = {
-        currentTime: globalTimingState[rcKey].defense.currentTime,
-        lastMode: globalTimingState[rcKey].defense.lastMode,
-        consecutiveErrors: globalTimingState[rcKey].defense.consecutiveErrors
+    // Initialize connection's timing state from the global timing state for the specific RC
+    connection.timingState = {
+        currentTime: globalTimingState[rcKey].currentTime,
+        lastMode: globalTimingState[rcKey].lastMode,
+        consecutiveErrors: globalTimingState[rcKey].consecutiveErrors
     };
 }
 
@@ -656,21 +665,37 @@ function updateConfigValues(newConfig = null) {
     whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : 
         (typeof config.whiteListMember === 'string' ? config.whiteListMember.split(',').map(name => name.trim()) : []);
     
-    // Convert booleans
+    // Clear rival cache when whitelist/blacklist changes to ensure updates take effect
+    rivalCache.clear();
+    
+    // Convert booleans - handle both string and boolean values explicitly
     config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
     config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
     config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
     config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
     config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
     
-    // Initialize timing states
-    if (globalTimingState.RC1.attack.currentTime === null) {
+    // Log config updates for debugging
+    if (newConfig) {
+        appLog(`🔄 Config updated - dualRCToggle: ${config.dualRCToggle}, standOnEnemy: ${config.standOnEnemy}`);
+    }
+    
+    // Initialize or update timing states (force update when config changes)
+    if (newConfig) {
+        // Force update timing states when config is updated via WebSocket
         globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime || 1870;
         globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime || 1870;
-    }
-    if (globalTimingState.RC2.attack.currentTime === null) {
         globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime || 1875;
         globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime || 1850;
+        appLog(`🔄 Timing states updated: RC1 Attack=${globalTimingState.RC1.attack.currentTime}ms, RC1 Defense=${globalTimingState.RC1.defense.currentTime}ms, RC2 Attack=${globalTimingState.RC2.attack.currentTime}ms, RC2 Defense=${globalTimingState.RC2.defense.currentTime}ms`);
+    } else {
+        // Initialize timing states only if null (first time)
+        if (globalTimingState.RC1.currentTime === null) {
+            globalTimingState.RC1.currentTime = config.RC1_startAttackTime || 1870;
+        }
+        if (globalTimingState.RC2.currentTime === null) {
+            globalTimingState.RC2.currentTime = config.RC2_startAttackTime || 1875;
+        }
     }
     
     // Re-initialize connection timing states
@@ -717,7 +742,14 @@ function connectToAPI() {
     });
     
     apiSocket.on('config_update', (data) => {
-       // appLog(`Received config update via WebSocket`);
+        appLog(`📡 Received config update via WebSocket:`, {
+            dualRCToggle: data.config.dualRCToggle,
+            standOnEnemy: data.config.standOnEnemy,
+            types: {
+                dualRCToggle: typeof data.config.dualRCToggle,
+                standOnEnemy: typeof data.config.standOnEnemy
+            }
+        });
         updateConfigValues(data.config);
         
         // Send response back to API
@@ -795,7 +827,7 @@ function genHash(code) {
 function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
     const rcKey = connection.rcKey;
-    const globalStateForRC = isAttack ? globalTimingState[rcKey].attack : globalTimingState[rcKey].defense;
+    const globalStateForRC = globalTimingState[rcKey];
     const configStart = isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`];
     const configStop = isAttack ? config[`${rcKey}_stopAttackTime`] : config[`${rcKey}_stopDefenceTime`];
     const configInterval = isAttack ? config[`${rcKey}_attackIntervalTime`] : config[`${rcKey}_defenceIntervalTime`];
@@ -820,8 +852,7 @@ function incrementTiming(mode, connection, errorType = 'success') {
     globalStateForRC.lastMode = mode;
 
     // Update the connection's timing state to reflect the global state immediately
-    connection.attackTimingState.currentTime = globalTimingState[rcKey].attack.currentTime;
-    connection.defenseTimingState.currentTime = globalTimingState[rcKey].defense.currentTime;
+    connection.timingState.currentTime = globalTimingState[rcKey].currentTime;
 
     return globalStateForRC.currentTime;
 }
@@ -829,7 +860,7 @@ function incrementTiming(mode, connection, errorType = 'success') {
 function getCurrentTiming(mode, connection) {
     const isAttack = mode === 'attack';
     const rcKey = connection.rcKey;
-    const globalStateForRC = isAttack ? globalTimingState[rcKey].attack : globalTimingState[rcKey].defense;
+    const globalStateForRC = globalTimingState[rcKey];
     let timing = globalStateForRC.currentTime !== null ? globalStateForRC.currentTime : (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
     
     // Apply timing precision adjustments based on statistics
@@ -1144,8 +1175,7 @@ async function createConnection() {
         cleanupPromise: null,
         lastActionCommand: null, // Track last action command
         lastMoveCommandTime: 0, // New property to track last move command time
-        attackTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
-        defenseTimingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
+        timingState: { currentTime: null, lastMode: null, consecutiveErrors: 0 }, // Per-connection timing state, will be synced with global
         
         send: function(str) {
             if (this.socket && this.socket.readyState === WebSocket.OPEN) {
