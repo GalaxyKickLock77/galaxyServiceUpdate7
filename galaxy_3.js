@@ -633,12 +633,22 @@ function getNextRC() {
 
 function initializeTimingStates(connection) {
     const rcKey = connection.rcKey;
+    const globalStateForRC = globalTimingState[rcKey];
+    
     // Initialize connection's timing state from the global timing state for the specific RC
     connection.timingState = {
-        currentTime: globalTimingState[rcKey].currentTime,
-        lastMode: globalTimingState[rcKey].lastMode,
-        consecutiveErrors: globalTimingState[rcKey].consecutiveErrors
+        currentTime: globalStateForRC.currentTime,
+        lastMode: globalStateForRC.lastMode,
+        consecutiveErrors: globalStateForRC.consecutiveErrors,
+        attack: {
+            currentTime: globalStateForRC.attack.currentTime
+        },
+        defense: {
+            currentTime: globalStateForRC.defense.currentTime
+        }
     };
+    
+    appLog(`🔄 Initialized timing states for ${connection.botId} (${rcKey}): Attack=${globalStateForRC.attack.currentTime}ms, Defense=${globalStateForRC.defense.currentTime}ms`);
 }
 
 function updateConfigValues(newConfig = null) {
@@ -680,21 +690,54 @@ function updateConfigValues(newConfig = null) {
         appLog(`🔄 Config updated - dualRCToggle: ${config.dualRCToggle}, standOnEnemy: ${config.standOnEnemy}`);
     }
     
-    // Initialize or update timing states (force update when config changes)
-    if (newConfig) {
-        // Force update timing states when config is updated via WebSocket
-        globalTimingState.RC1.attack.currentTime = config.RC1_startAttackTime || 1870;
-        globalTimingState.RC1.defense.currentTime = config.RC1_startDefenceTime || 1870;
-        globalTimingState.RC2.attack.currentTime = config.RC2_startAttackTime || 1875;
-        globalTimingState.RC2.defense.currentTime = config.RC2_startDefenceTime || 1850;
-        appLog(`🔄 Timing states updated: RC1 Attack=${globalTimingState.RC1.attack.currentTime}ms, RC1 Defense=${globalTimingState.RC1.defense.currentTime}ms, RC2 Attack=${globalTimingState.RC2.attack.currentTime}ms, RC2 Defense=${globalTimingState.RC2.defense.currentTime}ms`);
-    } else {
-        // Initialize timing states only if null (first time)
-        if (globalTimingState.RC1.currentTime === null) {
-            globalTimingState.RC1.currentTime = config.RC1_startAttackTime || 1870;
-        }
-        if (globalTimingState.RC2.currentTime === null) {
-            globalTimingState.RC2.currentTime = config.RC2_startAttackTime || 1875;
+    // Always update timing states when config is received (both start and update)
+    if (newConfig || !newConfig) {
+        // Debug log ALL config keys and values
+       // appLog(`🔍 Full config received:`, JSON.stringify(config, null, 2));
+       // appLog(`🔍 Config keys:`, Object.keys(config));
+       // appLog(`🔍 Specific timing values:`, {
+        //     RC1_startAttackTime: config.RC1_startAttackTime,
+        //     RC1_startDefenceTime: config.RC1_startDefenceTime,
+        //     RC2_startAttackTime: config.RC2_startAttackTime,
+        //     RC2_startDefenceTime: config.RC2_startDefenceTime,
+        //     types: {
+        //         RC1_startAttackTime: typeof config.RC1_startAttackTime,
+        //         RC1_startDefenceTime: typeof config.RC1_startDefenceTime,
+        //         RC2_startAttackTime: typeof config.RC2_startAttackTime,
+        //         RC2_startDefenceTime: typeof config.RC2_startDefenceTime
+        //     }
+        // });
+        
+        // Parse timing values from config parameters (Flask API removes '1' suffix)
+        const rc1AttackTime = parseInt(config.RC1_startAttackTime) || 1700;
+        const rc1DefenseTime = parseInt(config.RC1_startDefenceTime) || 1700;
+        const rc2AttackTime = parseInt(config.RC2_startAttackTime) || 1700;
+        const rc2DefenseTime = parseInt(config.RC2_startDefenceTime) || 1725;
+        
+        // Always update all timing states
+        globalTimingState.RC1.attack.currentTime = rc1AttackTime;
+        globalTimingState.RC1.defense.currentTime = rc1DefenseTime;
+        globalTimingState.RC1.currentTime = rc1AttackTime;
+        
+        globalTimingState.RC2.attack.currentTime = rc2AttackTime;
+        globalTimingState.RC2.defense.currentTime = rc2DefenseTime;
+        globalTimingState.RC2.currentTime = rc2AttackTime;
+        
+        appLog(`🔄 Timing states updated: RC1 Attack=${rc1AttackTime}ms, RC1 Defense=${rc1DefenseTime}ms, RC2 Attack=${rc2AttackTime}ms, RC2 Defense=${rc2DefenseTime}ms`);
+        
+        // Update existing connections immediately
+        connectionPool.forEach(conn => {
+            if (conn.timingState) {
+                conn.timingState.attack = { currentTime: conn.rcKey === 'RC1' ? rc1AttackTime : rc2AttackTime };
+                conn.timingState.defense = { currentTime: conn.rcKey === 'RC1' ? rc1DefenseTime : rc2DefenseTime };
+                appLog(`🔄 Updated connection ${conn.botId || 'pending'} (${conn.rcKey}) timing states`);
+            }
+        });
+        if (activeConnection && activeConnection.timingState) {
+            const isRC1 = activeConnection.rcKey === 'RC1';
+            activeConnection.timingState.attack = { currentTime: isRC1 ? rc1AttackTime : rc2AttackTime };
+            activeConnection.timingState.defense = { currentTime: isRC1 ? rc1DefenseTime : rc2DefenseTime };
+            appLog(`🔄 Updated active connection ${activeConnection.botId || 'pending'} (${activeConnection.rcKey}) timing states`);
         }
     }
     
@@ -742,14 +785,7 @@ function connectToAPI() {
     });
     
     apiSocket.on('config_update', (data) => {
-        appLog(`📡 Received config update via WebSocket:`, {
-            dualRCToggle: data.config.dualRCToggle,
-            standOnEnemy: data.config.standOnEnemy,
-            types: {
-                dualRCToggle: typeof data.config.dualRCToggle,
-                standOnEnemy: typeof data.config.standOnEnemy
-            }
-        });
+      //ved config update via WebSocket:`, data.config);
         updateConfigValues(data.config);
         
         // Send response back to API
@@ -828,9 +864,17 @@ function incrementTiming(mode, connection, errorType = 'success') {
     const isAttack = mode === 'attack';
     const rcKey = connection.rcKey;
     const globalStateForRC = globalTimingState[rcKey];
-    const configStart = isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`];
-    const configStop = isAttack ? config[`${rcKey}_stopAttackTime`] : config[`${rcKey}_stopDefenceTime`];
-    const configInterval = isAttack ? config[`${rcKey}_attackIntervalTime`] : config[`${rcKey}_defenceIntervalTime`];
+    
+    // Parse config values with proper parameter names (Flask API removes '1' suffix)
+    const configStart = isAttack ? 
+        parseInt(config[`${rcKey}_startAttackTime`]) || 1700 :
+        parseInt(config[`${rcKey}_startDefenceTime`]) || 1700;
+    const configStop = isAttack ? 
+        parseInt(config[`${rcKey}_stopAttackTime`]) || 1750 :
+        parseInt(config[`${rcKey}_stopDefenceTime`]) || 1775;
+    const configInterval = isAttack ? 
+        parseInt(config[`${rcKey}_attackIntervalTime`]) || 5 :
+        parseInt(config[`${rcKey}_defenceIntervalTime`]) || 5;
 
     if (errorType !== 'success') {
         globalStateForRC.consecutiveErrors++;
@@ -838,42 +882,48 @@ function incrementTiming(mode, connection, errorType = 'success') {
         globalStateForRC.consecutiveErrors = 0;
     }
 
-    const oldTime = globalStateForRC.currentTime;
-    globalStateForRC.currentTime += configInterval;
+    // Update the specific mode timing state
+    const modeState = isAttack ? globalStateForRC.attack : globalStateForRC.defense;
+    const oldTime = modeState.currentTime;
+    modeState.currentTime += configInterval;
 
-    if (globalStateForRC.currentTime > configStop) {
-        globalStateForRC.currentTime = configStart;
+    if (modeState.currentTime > configStop) {
+        modeState.currentTime = configStart;
         globalStateForRC.consecutiveErrors = 0;
-    //    appLog(`${mode} global timing for ${connection.botId} (${rcKey}) cycled back to start: ${globalStateForRC.currentTime}ms`);
+        appLog(`${mode} timing for ${connection.botId} (${rcKey}) cycled back to start: ${modeState.currentTime}ms`);
     } else {
-    //    appLog(`${mode} global timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${globalStateForRC.currentTime}ms (errors: ${globalStateForRC.consecutiveErrors}, type: ${errorType})`);
+        appLog(`${mode} timing for ${connection.botId} (${rcKey}) incremented: ${oldTime}ms -> ${modeState.currentTime}ms`);
     }
 
+    // Also update the general currentTime for backward compatibility
+    globalStateForRC.currentTime = modeState.currentTime;
     globalStateForRC.lastMode = mode;
 
     // Update the connection's timing state to reflect the global state immediately
-    connection.timingState.currentTime = globalTimingState[rcKey].currentTime;
+    connection.timingState.currentTime = modeState.currentTime;
 
-    return globalStateForRC.currentTime;
+    return modeState.currentTime;
 }
 
 function getCurrentTiming(mode, connection) {
     const isAttack = mode === 'attack';
     const rcKey = connection.rcKey;
     const globalStateForRC = globalTimingState[rcKey];
-    let timing = globalStateForRC.currentTime !== null ? globalStateForRC.currentTime : (isAttack ? config[`${rcKey}_startAttackTime`] : config[`${rcKey}_startDefenceTime`]);
     
-    // Apply timing precision adjustments based on statistics
-    if (timingStats.totalActions > 10) {
-        const adjustment = timingStats.averageDelay > 50 ? -Math.min(timingStats.averageDelay * 0.5, 100) : 0;
-        timing += adjustment;
-        if (adjustment !== 0) {
-            appLog(`⚡ Timing adjusted by ${adjustment.toFixed(1)}ms based on stats`);
-        }
+    // Get timing from the specific mode (attack/defense) state
+    let timing;
+    if (isAttack) {
+        timing = globalStateForRC.attack.currentTime !== null ? 
+            globalStateForRC.attack.currentTime : 
+            parseInt(config[`${rcKey}_startAttackTime`]) || 1700;
+    } else {
+        timing = globalStateForRC.defense.currentTime !== null ? 
+            globalStateForRC.defense.currentTime : 
+            parseInt(config[`${rcKey}_startDefenceTime`]) || 1700;
     }
     
     appLog(`🕰️ getCurrentTiming: mode=${mode}, rcKey=${rcKey}, timing=${timing}ms`);
-    return Math.max(100, timing); // Minimum 100ms
+    return Math.max(100, timing);
 }
 
 async function optimizedConnectionPoolMaintenance() {
