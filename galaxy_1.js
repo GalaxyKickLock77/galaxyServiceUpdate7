@@ -134,175 +134,6 @@ let lastConnectionFailure = 0;
 const MAX_CONNECTION_FAILURES = 5;
 const FAILURE_RESET_TIME = 60000; // 1 minute
 
-// 452 Error Prevention System - SUPER INTELLIGENT MODE
-let error452PreventionSystem = {
-    activeConnections: new Map(), // Track all active connections by rcKey
-    connectionQueue: new Map(), // Queue connections by rcKey to prevent overlap
-    lastSuccessfulAuth: new Map(), // Track last successful auth by rcKey
-    authAttemptCount: new Map(), // Track auth attempts by rcKey
-    rcCooldown: new Map(), // Cooldown periods for each RC
-    timingPreservation: new Map(), // Preserve timing states during 452 recovery
-    
-    // Intelligent connection spacing
-    MIN_CONNECTION_INTERVAL: 2500, // Minimum time between connections on same RC
-    AUTH_RETRY_DELAY: 1500, // Delay between auth retries
-    RC_SWITCH_DELAY: 800, // Delay when switching RCs
-    
-    // Initialize RC tracking
-    initializeRC(rcKey) {
-        if (!this.activeConnections.has(rcKey)) {
-            this.activeConnections.set(rcKey, null);
-            this.connectionQueue.set(rcKey, []);
-            this.lastSuccessfulAuth.set(rcKey, 0);
-            this.authAttemptCount.set(rcKey, 0);
-            this.rcCooldown.set(rcKey, 0);
-            this.timingPreservation.set(rcKey, null);
-        }
-    },
-    
-    // Check if RC is available for new connection
-    canUseRC(rcKey) {
-        this.initializeRC(rcKey);
-        const now = Date.now();
-        const lastAuth = this.lastSuccessfulAuth.get(rcKey);
-        const cooldown = this.rcCooldown.get(rcKey);
-        const activeConn = this.activeConnections.get(rcKey);
-        
-        // Check cooldown period
-        if (now < cooldown) {
-            return false;
-        }
-        
-        // Check minimum interval since last auth
-        if (now - lastAuth < this.MIN_CONNECTION_INTERVAL) {
-            return false;
-        }
-        
-        // Check if RC has active connection
-        if (activeConn && activeConn.state !== CONNECTION_STATES.CLOSED) {
-            return false;
-        }
-        
-        return true;
-    },
-    
-    // Get best available RC with intelligent selection
-    getBestRC() {
-        const availableRCs = ['RC1', 'RC2'].filter(rc => this.canUseRC(rc));
-        
-        if (availableRCs.length === 0) {
-            // Check which RC will be available soonest
-            const now = Date.now();
-            const rc1Cooldown = this.rcCooldown.get('RC1') || 0;
-            const rc2Cooldown = this.rcCooldown.get('RC2') || 0;
-            const rc1WaitTime = Math.max(0, rc1Cooldown - now);
-            const rc2WaitTime = Math.max(0, rc2Cooldown - now);
-            
-            // Choose RC with shortest wait time
-            const bestRC = rc1WaitTime <= rc2WaitTime ? 'RC1' : 'RC2';
-            const waitTime = Math.min(rc1WaitTime, rc2WaitTime);
-            
-            appLog(`⚠️ All RCs in cooldown - selecting ${bestRC} (wait: ${waitTime}ms)`);
-            
-            // If wait time is reasonable, return the RC (caller will handle waiting)
-            if (waitTime < 15000) { // Max 15 seconds wait
-                return bestRC;
-            }
-            
-            // Force use least recently used RC with extended delay as fallback
-            const rc1LastAuth = this.lastSuccessfulAuth.get('RC1') || 0;
-            const rc2LastAuth = this.lastSuccessfulAuth.get('RC2') || 0;
-            const fallbackRC = rc1LastAuth <= rc2LastAuth ? 'RC1' : 'RC2';
-            
-            appLog(`⚠️ Excessive wait times - forcing ${fallbackRC} with extended delay`);
-            return fallbackRC;
-        }
-        
-        // Select RC with best performance and longest rest time
-        return availableRCs.reduce((best, current) => {
-            const bestPerf = rcPerformance[best];
-            const currentPerf = rcPerformance[current];
-            const bestLastAuth = this.lastSuccessfulAuth.get(best);
-            const currentLastAuth = this.lastSuccessfulAuth.get(current);
-            
-            // Prefer RC with better success rate and longer rest
-            const bestScore = bestPerf.successRate + (Date.now() - bestLastAuth) / 10000;
-            const currentScore = currentPerf.successRate + (Date.now() - currentLastAuth) / 10000;
-            
-            return currentScore > bestScore ? current : best;
-        });
-    },
-    
-    // Register connection attempt
-    registerAttempt(rcKey, connection) {
-        this.initializeRC(rcKey);
-        this.activeConnections.set(rcKey, connection);
-        this.authAttemptCount.set(rcKey, (this.authAttemptCount.get(rcKey) || 0) + 1);
-        
-        // Preserve current timing state before potential 452
-        const currentTiming = globalTimingState[rcKey];
-        this.timingPreservation.set(rcKey, {
-            attack: { currentTime: currentTiming.attack.currentTime },
-            defense: { currentTime: currentTiming.defense.currentTime },
-            currentTime: currentTiming.currentTime,
-            lastMode: currentTiming.lastMode,
-            preservedAt: Date.now()
-        });
-    },
-    
-    // Register successful authentication
-    registerSuccess(rcKey) {
-        this.initializeRC(rcKey);
-        this.lastSuccessfulAuth.set(rcKey, Date.now());
-        this.authAttemptCount.set(rcKey, 0);
-        this.rcCooldown.set(rcKey, 0);
-        
-        // Clear preserved timing since auth was successful
-        this.timingPreservation.set(rcKey, null);
-    },
-    
-    // Handle 452 error with intelligent recovery
-    handle452Error(rcKey, connection) {
-        this.initializeRC(rcKey);
-        const attempts = this.authAttemptCount.get(rcKey) || 0;
-        
-        // Restore preserved timing state to maintain consistency
-        const preserved = this.timingPreservation.get(rcKey);
-        if (preserved && Date.now() - preserved.preservedAt < 30000) { // Within 30 seconds
-            globalTimingState[rcKey].attack.currentTime = preserved.attack.currentTime;
-            globalTimingState[rcKey].defense.currentTime = preserved.defense.currentTime;
-            globalTimingState[rcKey].currentTime = preserved.currentTime;
-            globalTimingState[rcKey].lastMode = preserved.lastMode;
-            appLog(`🔄 Restored timing state for ${rcKey} after 452 error: Attack=${preserved.attack.currentTime}ms, Defense=${preserved.defense.currentTime}ms`);
-        }
-        
-        // Set progressive cooldown based on attempt count
-        const cooldownTime = Math.min(10000, 2000 + (attempts * 1000)); // Max 10 seconds
-        this.rcCooldown.set(rcKey, Date.now() + cooldownTime);
-        
-        // Clear active connection but preserve RC availability
-        this.activeConnections.set(rcKey, null);
-        
-        // CRITICAL: Reset attempt count after cooldown to allow RC recovery
-        setTimeout(() => {
-            this.authAttemptCount.set(rcKey, 0);
-            appLog(`🔄 RC ${rcKey} attempt count reset after 452 cooldown - RC available for new connections`);
-        }, cooldownTime);
-        
-        appLog(`🚨 452 Error handled for ${rcKey} - Attempt ${attempts}, Cooldown: ${cooldownTime}ms, Timing preserved`);
-        
-        return cooldownTime;
-    },
-    
-    // Clean up connection tracking
-    cleanup(rcKey, connection) {
-        this.initializeRC(rcKey);
-        if (this.activeConnections.get(rcKey) === connection) {
-            this.activeConnections.set(rcKey, null);
-        }
-    }
-};
-
 function shouldAttemptConnection() {
     const now = Date.now();
     if (now - lastConnectionFailure > FAILURE_RESET_TIME) {
@@ -401,32 +232,6 @@ setInterval(() => {
         });
     }
 }, 5000);
-
-// RC Recovery check every 10 seconds to prevent stuck states
-setInterval(() => {
-    const now = Date.now();
-    const rc1Cooldown = error452PreventionSystem.rcCooldown.get('RC1') || 0;
-    const rc2Cooldown = error452PreventionSystem.rcCooldown.get('RC2') || 0;
-    const rc1Available = error452PreventionSystem.canUseRC('RC1');
-    const rc2Available = error452PreventionSystem.canUseRC('RC2');
-    
-    // If both RCs are in cooldown for too long, force reset one of them
-    if (!rc1Available && !rc2Available && (now - rc1Cooldown > 30000 || now - rc2Cooldown > 30000)) {
-        const rcToReset = (now - rc1Cooldown) > (now - rc2Cooldown) ? 'RC1' : 'RC2';
-        appLog(`🔄 Force resetting stuck RC ${rcToReset} after extended cooldown`);
-        error452PreventionSystem.rcCooldown.set(rcToReset, 0);
-        error452PreventionSystem.authAttemptCount.set(rcToReset, 0);
-        
-        // Attempt recovery if no active connection
-        if (!activeConnection && !isReconnectingAfterRivalAction) {
-            setTimeout(() => {
-                getConnection(true, true).catch(err => {
-                    appLog(`RC recovery connection failed: ${err.message}`);
-                });
-            }, 1000);
-        }
-    }
-}, 10000);
 
 // Perfect rival tracking system with memory optimization
 let trackedRivals = new Map(); // Map of rivalId -> { name, loginTime, mode, connection, coordinate, kickTimeout, presenceCheckTimeout }
@@ -812,26 +617,18 @@ function getNextRC() {
         return 'RC1';
     }
     
-    // SUPER INTELLIGENT RC SELECTION - 452 Error Prevention
-    const intelligentRC = error452PreventionSystem.getBestRC();
-    
-    // Verify the selected RC is actually available
-    if (!error452PreventionSystem.canUseRC(intelligentRC)) {
-        // Force wait for the best RC rather than risk 452 error
-        const waitTime = error452PreventionSystem.rcCooldown.get(intelligentRC) - Date.now();
-        if (waitTime > 0 && waitTime < 5000) { // Only wait up to 5 seconds
-            appLog(`⏳ Waiting ${waitTime}ms for optimal RC ${intelligentRC} to avoid 452 error`);
-            // Return a promise that resolves after the wait
-            return new Promise(resolve => {
-                setTimeout(() => resolve(intelligentRC), waitTime);
-            });
-        }
+    // Smart RC selection based on performance (every 10th connection)
+    if (rcPerformance.RC1.totalConnections + rcPerformance.RC2.totalConnections > 0 && 
+        (rcPerformance.RC1.totalConnections + rcPerformance.RC2.totalConnections) % 10 === 0) {
+        const bestRC = getBestPerformingRC();
+        appLog(`🎯 Smart RC selection: ${bestRC} (RC1: ${(rcPerformance.RC1.successRate * 100).toFixed(1)}%, RC2: ${(rcPerformance.RC2.successRate * 100).toFixed(1)}%)`);
+        return bestRC;
     }
     
-    lastUsedRC = intelligentRC;
+    // Default alternating behavior
+    lastUsedRC = lastUsedRC === 'RC1' ? 'RC2' : 'RC1';
     lastRCSwitch = Date.now();
-    appLog(`🎯 Intelligent RC selection: ${intelligentRC} (Error-prevention active)`);
-    return intelligentRC;
+    return lastUsedRC;
 }
 
 function initializeTimingStates(connection) {
@@ -1393,23 +1190,15 @@ async function getMonitoringConnection() {
 
 
 async function createConnection() {
-    // SUPER INTELLIGENT CONNECTION CREATION - 452 Error Prevention
-    let rcKey = getNextRC();
-    
-    // Handle promise return from getNextRC (when waiting for optimal RC)
-    if (rcKey instanceof Promise) {
-        rcKey = await rcKey;
-    }
-    
-    // Additional safety check before using RC
-    if (!error452PreventionSystem.canUseRC(rcKey)) {
-        const waitTime = Math.max(0, error452PreventionSystem.rcCooldown.get(rcKey) - Date.now());
-        if (waitTime > 0) {
-            appLog(`⏳ Final safety wait ${waitTime}ms for RC ${rcKey}`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
+    // Add 500ms pause between RC switches for dual RC mode
+    if (config.dualRCToggle && lastRCSwitch > 0) {
+        const timeSinceSwitch = Date.now() - lastRCSwitch;
+        if (timeSinceSwitch < 500) {
+            await new Promise(resolve => setTimeout(resolve, 500 - timeSinceSwitch));
         }
     }
     
+    const rcKey = getNextRC();
     const rcValue = config[rcKey];
    appLog(`Creating new connection instance with ${rcKey}: ${rcValue}`);
     const conn = {
@@ -1464,9 +1253,6 @@ async function createConnection() {
                         reject(new Error("Circuit breaker active - too many connection failures"));
                         return;
                     }
-                    
-                    // Register this connection attempt with 452 prevention system
-                    error452PreventionSystem.registerAttempt(this.rcKey, this);
                     
                     this.socket = new WebSocket("wss://cs.mobstudio.ru:6672/", { 
                         rejectUnauthorized: false, 
@@ -1656,9 +1442,6 @@ async function createConnection() {
                         updateConnectionHealth(this, true, connectionTime);
                         connectionFailureCount = 0; // Reset failure count on success
                         
-                        // Register successful authentication with 452 prevention system
-                        error452PreventionSystem.registerSuccess(this.rcKey);
-                        
                     //    appLog(`Connection [${this.botId}] authenticated, sending setup commands...`);
                         if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("FWLISTVER 0");
                         if (this.socket && this.socket.readyState === WebSocket.OPEN) this.send("ADDONS 0 0");
@@ -1844,32 +1627,24 @@ async function createConnection() {
                         this.cleanup();
                         break;
                     case "452":
-                        // SUPER INTELLIGENT 452 ERROR HANDLING - TIMING PRESERVATION
-                        const cooldownTime = error452PreventionSystem.handle452Error(this.rcKey, this);
-                        
                         // Update connection health - failed connection (only on final failure)
-                        if (this.userCommandRetryCount >= 3) { // Reduced from 10 to 3 for faster recovery
+                        if (this.userCommandRetryCount >= 10) {
                             updateConnectionHealth(this, false, Date.now() - (this.connectionStartTime || Date.now()));
                         }
                         
-                        appLog(`🚨 INTELLIGENT 452 Handler: 452 :${message.split(':').slice(1).join(':')} - Timing preserved, cooldown: ${cooldownTime}ms`);
-                        
-                        if (this.authenticating && this.userCommandRetryCount < 3) { // Reduced retries
+                    //    appLog(`Critical error 452 [${this.botId || 'connecting'}]: ${message}`);
+                        if (this.authenticating && this.userCommandRetryCount < 10) {
                             this.userCommandRetryCount++;
-                            appLog(`🔄 Smart retry ${this.userCommandRetryCount}/3 for ${this.botId} - waiting ${error452PreventionSystem.AUTH_RETRY_DELAY}ms`);
-                            
-                            // Intelligent retry with delay
-                            setTimeout(() => {
-                                if (this.botId && this.password && this.nick && this.hash && this.socket && this.socket.readyState === WebSocket.OPEN) {
-                                    this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
-                                } else {
-                                    appLog(`❌ Cannot retry 452: missing data or closed socket [${this.botId}]`);
-                                    this.authenticating = false;
-                                    clearTimeout(this.connectionTimeout);
-                                    this.cleanup();
-                                    reject(new Error(`Critical error 452 and missing data for retry`));
-                                }
-                            }, error452PreventionSystem.AUTH_RETRY_DELAY);
+                        //    appLog(`Retrying command (attempt ${this.userCommandRetryCount}/10) [${this.botId}]`);
+                            if (this.botId && this.password && this.nick && this.hash) {
+                                this.send(`USER ${this.botId} ${this.password} ${this.nick} ${this.hash}`);
+                            } else {
+                            //    appLog(`Cannot retry command: missing required data [${this.botId}]`);
+                                this.authenticating = false;
+                                clearTimeout(this.connectionTimeout);
+                                this.cleanup();
+                                reject(new Error(`Critical error 452 and missing data for retry`));
+                            }
                         } else if (this.authenticating) {
                             this.authenticating = false;
                             clearTimeout(this.connectionTimeout);
@@ -1879,17 +1654,8 @@ async function createConnection() {
                             if (this === activeConnection) {
                                 activeConnection = null;
                             }
-                            appLog(`⚡ 452 error after retries - timing preserved, scheduling recovery in ${cooldownTime}ms`);
-                            
-                            // CRITICAL: Schedule recovery after cooldown to ensure RC becomes available again
-                            setTimeout(() => {
-                                appLog(`🔄 452 Recovery: RC ${this.rcKey} cooldown expired, attempting new connection`);
-                                getConnection(true, true).catch(err => {
-                                    appLog(`452 Recovery failed: ${err.message}`);
-                                });
-                            }, cooldownTime + 500); // Extra 500ms buffer
-                            
-                            reject(new Error(`Critical error 452 after intelligent retries`));
+                        //    appLog(`⚡ Got 452 error after ${this.userCommandRetryCount} retries, closed connection, removed from pool, and trying recovery with 10-second backoff...`);
+                            reject(new Error(`Critical error 452 after retries`));
                             return;
                         } else {
                             this.cleanup();
@@ -2061,11 +1827,6 @@ async function createConnection() {
             this.cleanupPromise = new Promise((resolve) => {
                 this.cleanupResolve = resolve;
                 try {
-                    // Clean up 452 prevention system tracking
-                    if (this.rcKey) {
-                        error452PreventionSystem.cleanup(this.rcKey, this);
-                    }
-                    
                     if (this.socket) {
                         if (sendQuit && this.socket.readyState === WebSocket.OPEN) {
                             this.send("QUIT :ds");
