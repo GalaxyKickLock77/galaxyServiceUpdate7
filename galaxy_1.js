@@ -191,21 +191,31 @@ let error452PreventionSystem = {
         const availableRCs = ['RC1', 'RC2'].filter(rc => this.canUseRC(rc));
         
         if (availableRCs.length === 0) {
-            // Force use least recently used RC with extended delay
-            const rc1LastAuth = this.lastSuccessfulAuth.get('RC1') || 0;
-            const rc2LastAuth = this.lastSuccessfulAuth.get('RC2') || 0;
-            const bestRC = rc1LastAuth <= rc2LastAuth ? 'RC1' : 'RC2';
-            
-            // Set extended cooldown to prevent 452
+            // Check which RC will be available soonest
             const now = Date.now();
-            const lastAuth = this.lastSuccessfulAuth.get(bestRC);
-            const requiredWait = this.MIN_CONNECTION_INTERVAL - (now - lastAuth);
+            const rc1Cooldown = this.rcCooldown.get('RC1') || 0;
+            const rc2Cooldown = this.rcCooldown.get('RC2') || 0;
+            const rc1WaitTime = Math.max(0, rc1Cooldown - now);
+            const rc2WaitTime = Math.max(0, rc2Cooldown - now);
             
-            if (requiredWait > 0) {
-                this.rcCooldown.set(bestRC, now + requiredWait + 500); // Extra 500ms buffer
+            // Choose RC with shortest wait time
+            const bestRC = rc1WaitTime <= rc2WaitTime ? 'RC1' : 'RC2';
+            const waitTime = Math.min(rc1WaitTime, rc2WaitTime);
+            
+            appLog(`⚠️ All RCs in cooldown - selecting ${bestRC} (wait: ${waitTime}ms)`);
+            
+            // If wait time is reasonable, return the RC (caller will handle waiting)
+            if (waitTime < 15000) { // Max 15 seconds wait
+                return bestRC;
             }
             
-            return bestRC;
+            // Force use least recently used RC with extended delay as fallback
+            const rc1LastAuth = this.lastSuccessfulAuth.get('RC1') || 0;
+            const rc2LastAuth = this.lastSuccessfulAuth.get('RC2') || 0;
+            const fallbackRC = rc1LastAuth <= rc2LastAuth ? 'RC1' : 'RC2';
+            
+            appLog(`⚠️ Excessive wait times - forcing ${fallbackRC} with extended delay`);
+            return fallbackRC;
         }
         
         // Select RC with best performance and longest rest time
@@ -270,8 +280,14 @@ let error452PreventionSystem = {
         const cooldownTime = Math.min(10000, 2000 + (attempts * 1000)); // Max 10 seconds
         this.rcCooldown.set(rcKey, Date.now() + cooldownTime);
         
-        // Clear active connection
+        // Clear active connection but preserve RC availability
         this.activeConnections.set(rcKey, null);
+        
+        // CRITICAL: Reset attempt count after cooldown to allow RC recovery
+        setTimeout(() => {
+            this.authAttemptCount.set(rcKey, 0);
+            appLog(`🔄 RC ${rcKey} attempt count reset after 452 cooldown - RC available for new connections`);
+        }, cooldownTime);
         
         appLog(`🚨 452 Error handled for ${rcKey} - Attempt ${attempts}, Cooldown: ${cooldownTime}ms, Timing preserved`);
         
@@ -385,6 +401,32 @@ setInterval(() => {
         });
     }
 }, 5000);
+
+// RC Recovery check every 10 seconds to prevent stuck states
+setInterval(() => {
+    const now = Date.now();
+    const rc1Cooldown = error452PreventionSystem.rcCooldown.get('RC1') || 0;
+    const rc2Cooldown = error452PreventionSystem.rcCooldown.get('RC2') || 0;
+    const rc1Available = error452PreventionSystem.canUseRC('RC1');
+    const rc2Available = error452PreventionSystem.canUseRC('RC2');
+    
+    // If both RCs are in cooldown for too long, force reset one of them
+    if (!rc1Available && !rc2Available && (now - rc1Cooldown > 30000 || now - rc2Cooldown > 30000)) {
+        const rcToReset = (now - rc1Cooldown) > (now - rc2Cooldown) ? 'RC1' : 'RC2';
+        appLog(`🔄 Force resetting stuck RC ${rcToReset} after extended cooldown`);
+        error452PreventionSystem.rcCooldown.set(rcToReset, 0);
+        error452PreventionSystem.authAttemptCount.set(rcToReset, 0);
+        
+        // Attempt recovery if no active connection
+        if (!activeConnection && !isReconnectingAfterRivalAction) {
+            setTimeout(() => {
+                getConnection(true, true).catch(err => {
+                    appLog(`RC recovery connection failed: ${err.message}`);
+                });
+            }, 1000);
+        }
+    }
+}, 10000);
 
 // Perfect rival tracking system with memory optimization
 let trackedRivals = new Map(); // Map of rivalId -> { name, loginTime, mode, connection, coordinate, kickTimeout, presenceCheckTimeout }
@@ -1810,7 +1852,7 @@ async function createConnection() {
                             updateConnectionHealth(this, false, Date.now() - (this.connectionStartTime || Date.now()));
                         }
                         
-                        appLog(`🚨 INTELLIGENT 452 Handler: ${message} - Timing preserved, cooldown: ${cooldownTime}ms`);
+                        appLog(`🚨 INTELLIGENT 452 Handler: 452 :${message.split(':').slice(1).join(':')} - Timing preserved, cooldown: ${cooldownTime}ms`);
                         
                         if (this.authenticating && this.userCommandRetryCount < 3) { // Reduced retries
                             this.userCommandRetryCount++;
@@ -1837,7 +1879,16 @@ async function createConnection() {
                             if (this === activeConnection) {
                                 activeConnection = null;
                             }
-                            appLog(`⚡ 452 error after retries - timing preserved, intelligent recovery initiated`);
+                            appLog(`⚡ 452 error after retries - timing preserved, scheduling recovery in ${cooldownTime}ms`);
+                            
+                            // CRITICAL: Schedule recovery after cooldown to ensure RC becomes available again
+                            setTimeout(() => {
+                                appLog(`🔄 452 Recovery: RC ${this.rcKey} cooldown expired, attempting new connection`);
+                                getConnection(true, true).catch(err => {
+                                    appLog(`452 Recovery failed: ${err.message}`);
+                                });
+                            }, cooldownTime + 500); // Extra 500ms buffer
+                            
                             reject(new Error(`Critical error 452 after intelligent retries`));
                             return;
                         } else {
