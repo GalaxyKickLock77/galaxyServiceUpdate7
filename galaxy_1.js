@@ -785,7 +785,7 @@ function connectToAPI() {
     });
     
     apiSocket.on('config_update', (data) => {
-        appLog(`📡 Received config update via WebSocket:`, data.config);
+      //ved config update via WebSocket:`, data.config);
         updateConfigValues(data.config);
         
         // Send response back to API
