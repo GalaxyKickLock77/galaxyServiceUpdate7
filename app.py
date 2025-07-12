@@ -57,7 +57,8 @@ def write_config_instant(data, form_number):
         "standOnEnemy": string_to_bool(data[f'standOnEnemy{form_number}']),
         "actionOnEnemy": string_to_bool(data[f'actionOnEnemy{form_number}']),
         "aiChatToggle": string_to_bool(data[f'aiChatToggle{form_number}']),
-        "dualRCToggle": string_to_bool(data[f'dualRCToggle{form_number}'])
+        "dualRCToggle": string_to_bool(data[f'dualRCToggle{form_number}']),
+        "aiPilotToggle": string_to_bool(data[f'aiPilotToggle{form_number}'])
     }
 
     if config['dualRCToggle']:
@@ -307,6 +308,7 @@ def update_galaxy(form_number):
             "actionOnEnemy": string_to_bool(data.get(f'actionOnEnemy{form_number}', False)),
             "aiChatToggle": string_to_bool(data.get(f'aiChatToggle{form_number}', False)),
             "dualRCToggle": string_to_bool(data.get(f'dualRCToggle{form_number}', True)),
+            "aiPilotToggle": string_to_bool(data.get(f'aiPilotToggle{form_number}', False)),
             "timestamp": int(time.time() * 1000)
         }
         

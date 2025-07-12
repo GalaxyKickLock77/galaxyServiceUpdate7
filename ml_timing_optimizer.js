@@ -11,6 +11,9 @@ class TimingOptimizer {
         this.timingHistory = new Map();
         this.successRates = new Map();
         
+        // Initialize logging function
+        this.log = (typeof appLog !== 'undefined') ? appLog : console.log;
+        
         // Load existing data if available
         this.loadHistoricalData();
     }
@@ -125,10 +128,10 @@ class TimingOptimizer {
                 this.model.trees.push(tree);
             }
 
-            appLog(`🤖 ML Model trained with ${this.trainingData.length} samples`);
+            this.log(`🤖 ML Model trained with ${this.trainingData.length} samples`);
             
         } catch (err) {
-            appLog(`❌ ML Training error: ${err.message}`);
+            this.log(`❌ ML Training error: ${err.message}`);
         } finally {
             this.isTraining = false;
         }
