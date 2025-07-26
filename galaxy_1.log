@@ -1,0 +1,105 @@
+[2025-07-26T09:25:40.457Z] Config loaded from config1.json file 
+[2025-07-26T09:25:40.459Z] 🔄 Timing states updated: RC1 Attack=1475ms, RC1 Defense=1700ms, RC2 Attack=1450ms, RC2 Defense=1525ms 
+[2025-07-26T09:25:40.474Z] Creating new connection instance with RC1: onfoqk2ff1 
+[2025-07-26T09:25:40.575Z] Starting recovery with alternating RCs 
+[2025-07-26T09:25:40.975Z] Creating new connection instance with RC2: l77mufpsgy 
+[2025-07-26T09:25:40.980Z] Creating new connection instance with RC1: onfoqk2ff1 
+[2025-07-26T09:25:41.480Z] Config loaded from config1.json file 
+[2025-07-26T09:25:41.481Z] 🔄 Timing states updated: RC1 Attack=1475ms, RC1 Defense=1700ms, RC2 Attack=1450ms, RC2 Defense=1525ms 
+[2025-07-26T09:25:42.455Z] 🔄 Initialized timing states for null (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:25:42.509Z] 🔄 Initialized timing states for null (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:25:42.536Z] 🔄 Initialized timing states for null (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:25:42.724Z] connection reached state 
+[2025-07-26T09:25:42.763Z] connection reached state 
+[2025-07-26T09:25:43.334Z] 🚀 Optimized connection initialized 
+[2025-07-26T09:25:43.683Z] 📊 Connection [54531773] READY - Health: Score: 100.0% (1/1) Avg: 2701ms 
+[2025-07-26T09:25:43.992Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:25:59.749Z] Rival RX_ joined [54531773] - Attack mode activated 
+[2025-07-26T09:25:59.902Z] 📋 Queued rival RX_ for attack mode 
+[2025-07-26T09:25:59.971Z] 🤖 AI Timing: mode=attack, rcKey=RC1, AI=1539ms, manual=1475ms 
+[2025-07-26T09:25:59.972Z] 📅 Scheduling rival RX_ (attack) - Wait: 1539ms, Check: 1339ms 
+[2025-07-26T09:26:01.322Z] 🔍 Checking presence of rival RX_ before kick... 
+[2025-07-26T09:26:01.518Z] ⚡ Executing scheduled kick for rival RX_ 
+[2025-07-26T09:26:01.521Z] Executing rival action in attack mode [54531773] 
+[2025-07-26T09:26:01.843Z] Trying to Prison RX_ (ID: 84863869) [54531773] 
+[2025-07-26T09:26:02.136Z] Active connection closed 
+[2025-07-26T09:26:02.141Z] ⚡ Connection 54531773 closed, activating new connection 
+[2025-07-26T09:26:02.414Z] 📊 Connection [61248897] READY - Health: Score: 100.0% (1/1) Avg: 21436ms 
+[2025-07-26T09:26:02.416Z] 🔄 Initialized timing states for 61248897 (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:26:02.718Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:26:04.106Z] Rival RX_ joined [61248897] - Attack mode activated 
+[2025-07-26T09:26:04.269Z] 📋 Queued rival RX_ for attack mode 
+[2025-07-26T09:26:04.341Z] 🤖 AI Timing: mode=attack, rcKey=RC2, AI=1480ms, manual=1450ms 
+[2025-07-26T09:26:04.342Z] 📅 Scheduling rival RX_ (attack) - Wait: 1480ms, Check: 1280ms 
+[2025-07-26T09:26:05.625Z] 🔍 Checking presence of rival RX_ before kick... 
+[2025-07-26T09:26:05.827Z] ⚡ Executing scheduled kick for rival RX_ 
+[2025-07-26T09:26:05.828Z] Executing rival action in attack mode [61248897] 
+[2025-07-26T09:26:06.138Z] Trying to Prison RX_ (ID: 84863869) [61248897] 
+[2025-07-26T09:26:06.419Z] Active connection closed 
+[2025-07-26T09:26:06.420Z] ⚡ Connection 61248897 closed, activating new connection 
+[2025-07-26T09:26:06.572Z] 🔄 Resetting processing flag 
+[2025-07-26T09:26:06.720Z] 📊 Connection [54531773] READY - Health: Score: 100.0% (1/1) Avg: 26243ms 
+[2025-07-26T09:26:06.721Z] 🔄 Initialized timing states for 54531773 (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:26:06.722Z] Creating new connection instance with RC2: l77mufpsgy 
+[2025-07-26T09:26:07.021Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:26:07.236Z] Creating new connection instance with RC1: onfoqk2ff1 
+[2025-07-26T09:26:08.300Z] Rival RX_ joined [54531773] - Attack mode activated 
+[2025-07-26T09:26:08.419Z] 🔄 Initialized timing states for null (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:26:08.461Z] 📋 Queued rival RX_ for attack mode 
+[2025-07-26T09:26:08.523Z] 🤖 AI Timing: mode=attack, rcKey=RC1, AI=1490ms, manual=1475ms 
+[2025-07-26T09:26:08.523Z] 📅 Scheduling rival RX_ (attack) - Wait: 1490ms, Check: 1290ms 
+[2025-07-26T09:26:08.684Z] connection reached state 
+[2025-07-26T09:26:08.685Z] 🔄 Initialized timing states for null (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:26:09.017Z] connection reached state 
+[2025-07-26T09:26:09.817Z] 🔍 Checking presence of rival RX_ before kick... 
+[2025-07-26T09:26:10.019Z] ⚡ Executing scheduled kick for rival RX_ 
+[2025-07-26T09:26:10.020Z] Executing rival action in attack mode [54531773] 
+[2025-07-26T09:26:10.330Z] Trying to Prison RX_ (ID: 84863869) [54531773] 
+[2025-07-26T09:26:10.503Z] 🔄 Force resetting stuck processing flag 
+[2025-07-26T09:26:10.595Z] 🔄 Force enabling monitoring mode 
+[2025-07-26T09:26:10.631Z] Active connection closed 
+[2025-07-26T09:26:10.639Z] ⚡ Connection 54531773 closed, activating new connection 
+[2025-07-26T09:26:10.923Z] 📊 Connection [54531773] READY - Health: Score: 100.0% (1/1) Avg: 3686ms 
+[2025-07-26T09:26:10.923Z] 🔄 Initialized timing states for 54531773 (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:26:11.236Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:26:12.698Z] Rival RX_ joined [54531773] - Attack mode activated 
+[2025-07-26T09:26:12.852Z] 📋 Queued rival RX_ for attack mode 
+[2025-07-26T09:26:12.922Z] 🤖 AI Timing: mode=attack, rcKey=RC1, AI=1490ms, manual=1475ms 
+[2025-07-26T09:26:12.923Z] 📅 Scheduling rival RX_ (attack) - Wait: 1490ms, Check: 1290ms 
+[2025-07-26T09:26:14.218Z] 🔍 Checking presence of rival RX_ before kick... 
+[2025-07-26T09:26:14.420Z] ⚡ Executing scheduled kick for rival RX_ 
+[2025-07-26T09:26:14.421Z] Executing rival action in attack mode [54531773] 
+[2025-07-26T09:26:14.609Z] 🔄 Resetting processing flag 
+[2025-07-26T09:26:14.610Z] 🔄 Force enabling monitoring mode 
+[2025-07-26T09:26:14.735Z] Trying to Prison RX_ (ID: 84863869) [54531773] 
+[2025-07-26T09:26:15.030Z] Active connection closed 
+[2025-07-26T09:26:15.035Z] ⚡ Connection 54531773 closed, activating new connection 
+[2025-07-26T09:26:15.301Z] 📊 Connection [61248897] READY - Health: Score: 100.0% (1/1) Avg: 8579ms 
+[2025-07-26T09:26:15.302Z] 🔄 Initialized timing states for 61248897 (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:26:15.303Z] Creating new connection instance with RC2: l77mufpsgy 
+[2025-07-26T09:26:15.611Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:26:15.813Z] Creating new connection instance with RC1: onfoqk2ff1 
+[2025-07-26T09:26:16.684Z] 🔄 Initialized timing states for null (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:26:16.914Z] Rival RX_ joined [61248897] - Attack mode activated 
+[2025-07-26T09:26:16.949Z] connection reached state 
+[2025-07-26T09:26:17.068Z] 📋 Queued rival RX_ for attack mode 
+[2025-07-26T09:26:17.133Z] 🤖 AI Timing: mode=attack, rcKey=RC2, AI=1480ms, manual=1450ms 
+[2025-07-26T09:26:17.134Z] 📅 Scheduling rival RX_ (attack) - Wait: 1480ms, Check: 1280ms 
+[2025-07-26T09:26:17.194Z] 🔄 Initialized timing states for null (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:26:17.466Z] connection reached state 
+[2025-07-26T09:26:18.424Z] 🔍 Checking presence of rival RX_ before kick... 
+[2025-07-26T09:26:18.627Z] ⚡ Executing scheduled kick for rival RX_ 
+[2025-07-26T09:26:18.628Z] Executing rival action in attack mode [61248897] 
+[2025-07-26T09:26:18.628Z] 🔄 Resetting processing flag 
+[2025-07-26T09:26:18.631Z] 🔄 Force enabling monitoring mode 
+[2025-07-26T09:26:18.937Z] Trying to Prison RX_ (ID: 84863869) [61248897] 
+[2025-07-26T09:26:19.201Z] Active connection closed 
+[2025-07-26T09:26:19.201Z] ⚡ Connection 61248897 closed, activating new connection 
+[2025-07-26T09:26:19.462Z] 📊 Connection [54531773] READY - Health: Score: 100.0% (1/1) Avg: 3646ms 
+[2025-07-26T09:26:19.464Z] 🔄 Initialized timing states for 54531773 (RC1): Attack=1475ms, Defense=1700ms 
+[2025-07-26T09:26:19.773Z] 🔍 Auto-sent WHO after connection ready to detect existing rivals 
+[2025-07-26T09:26:20.503Z] Creating new connection instance with RC2: l77mufpsgy 
+[2025-07-26T09:26:21.810Z] 🔄 Initialized timing states for null (RC2): Attack=1450ms, Defense=1525ms 
+[2025-07-26T09:26:22.059Z] connection reached state 
+[2025-07-26T09:26:36.510Z] Shutting down... 
+[2025-07-26T09:26:36.882Z] Active connection closed 
