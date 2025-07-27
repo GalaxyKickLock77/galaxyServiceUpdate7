@@ -476,6 +476,12 @@ let rivalActivityProfiles = new Map(); // rivalId -> activity profile
 
 // Track rival activity for AI prediction enhancement
 function trackRivalActivity(rivalId, activityType, data = {}) {
+    // **ENHANCED SAFETY**: Validate inputs
+    if (!rivalId || typeof rivalId !== 'string') {
+        appLog(`⚠️ trackRivalActivity: Invalid rivalId: ${rivalId}`);
+        return;
+    }
+    
     if (!rivalActivityProfiles.has(rivalId)) {
         rivalActivityProfiles.set(rivalId, {
             activities: [],
@@ -491,10 +497,31 @@ function trackRivalActivity(rivalId, activityType, data = {}) {
             movementVariability: [],
             interactionComplexity: 0
         });
+        
+        appLog(`🆕 Created activity profile for ${rivalId}`);
     } else {
         // CRITICAL: Update loginTime if this is a new join activity (rival rejoining)
-        if (activityType === 'activity' && data.type === 'join') {
+        if (activityType === 'activity' && data && data.type === 'join') {
             const profile = rivalActivityProfiles.get(rivalId);
+            
+            // **SAFETY CHECK**: Ensure profile exists
+            if (!profile) {
+                appLog(`⚠️ trackRivalActivity: Profile missing for ${rivalId}, recreating`);
+                rivalActivityProfiles.set(rivalId, {
+                    activities: [],
+                    movements: [],
+                    interactions: [],
+                    loginTime: Date.now(),
+                    sessionDuration: 0,
+                    lastActivityTime: Date.now(),
+                    activityIntervals: [],
+                    responseDelays: [],
+                    movementVariability: [],
+                    interactionComplexity: 0
+                });
+                return;
+            }
+            
             const newLoginTime = Date.now();
             
             // Clear previous session data for the new session
@@ -514,6 +541,13 @@ function trackRivalActivity(rivalId, activityType, data = {}) {
     }
     
     const profile = rivalActivityProfiles.get(rivalId);
+    
+    // **CRITICAL SAFETY CHECK**: Ensure profile exists before proceeding
+    if (!profile) {
+        appLog(`⚠️ trackRivalActivity: No profile found for ${rivalId} after initialization`);
+        return;
+    }
+    
     const timestamp = Date.now();
     
     // **ENHANCED ACTIVITY TRACKING WITH HUMAN DETECTION**

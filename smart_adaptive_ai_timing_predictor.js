@@ -360,21 +360,44 @@ class SmartAdaptiveTimingPredictor {
         if (now - this.networkSystem.lastPingTime > 5000) { // Update every 5 seconds
             const currentPing = Math.random() * 20 + 30; // 30-50ms simulated ping
             
-            this.networkSystem.pingHistory.push(currentPing);
-            if (this.networkSystem.pingHistory.length > 10) {
-                this.networkSystem.pingHistory.shift();
+            // **ENHANCED SAFETY**: Ensure pingHistory exists and is array
+            if (!this.networkSystem.pingHistory || !Array.isArray(this.networkSystem.pingHistory)) {
+                this.networkSystem.pingHistory = [];
+                console.log(`🔧 Initializing pingHistory array`);
             }
             
-            // Calculate average ping
-            this.networkSystem.averagePing = this.networkSystem.pingHistory.reduce((a, b) => a + b, 0) / this.networkSystem.pingHistory.length;
+            try {
+                this.networkSystem.pingHistory.push(currentPing);
+                if (this.networkSystem.pingHistory.length > 10) {
+                    this.networkSystem.pingHistory.shift();
+                }
+                
+                // Calculate average ping
+                this.networkSystem.averagePing = this.networkSystem.pingHistory.reduce((a, b) => a + b, 0) / this.networkSystem.pingHistory.length;
+            } catch (pushError) {
+                console.log(`⚠️ Error pushing to pingHistory: ${pushError.message}`);
+                this.networkSystem.pingHistory = [currentPing];
+                this.networkSystem.averagePing = currentPing;
+            }
             
             // Detect lag spikes
             if (currentPing > this.networkSystem.averagePing + 20) {
-                this.networkSystem.serverLagSpikes.push({
-                    ping: currentPing,
-                    timestamp: now
-                });
-                console.log(`🌐 Lag spike detected: ${currentPing.toFixed(1)}ms (avg: ${this.networkSystem.averagePing.toFixed(1)}ms)`);
+                // **ENHANCED SAFETY**: Ensure serverLagSpikes exists and is array
+                if (!this.networkSystem.serverLagSpikes || !Array.isArray(this.networkSystem.serverLagSpikes)) {
+                    this.networkSystem.serverLagSpikes = [];
+                    console.log(`🔧 Initializing serverLagSpikes array`);
+                }
+                
+                try {
+                    this.networkSystem.serverLagSpikes.push({
+                        ping: currentPing,
+                        timestamp: now
+                    });
+                    console.log(`🌐 Lag spike detected: ${currentPing.toFixed(1)}ms (avg: ${this.networkSystem.averagePing.toFixed(1)}ms)`);
+                } catch (pushError) {
+                    console.log(`⚠️ Error pushing to serverLagSpikes: ${pushError.message}`);
+                    this.networkSystem.serverLagSpikes = [];
+                }
             }
             
             // Clean old lag spikes
@@ -415,12 +438,22 @@ class SmartAdaptiveTimingPredictor {
                 return;
             }
             
+            // **ENHANCED SAFETY**: Initialize enhancedAnalysis if not exists
+            if (!this.enhancedAnalysis.actionTimingPatterns) {
+                this.enhancedAnalysis.actionTimingPatterns = new Map();
+            }
+            
             // Track exact action timings
-            if (sessionData.actionTimestamp) {
-                const actionPatterns = this.enhancedAnalysis.actionTimingPatterns.get(rivalId) || [];
+            if (sessionData && sessionData.actionTimestamp) {
+                let actionPatterns = this.enhancedAnalysis.actionTimingPatterns.get(rivalId);
                 
-                // **SAFETY CHECK**: Ensure actionPatterns is an array
-                if (Array.isArray(actionPatterns)) {
+                // **ENHANCED SAFETY CHECK**: Always ensure array exists
+                if (!actionPatterns || !Array.isArray(actionPatterns)) {
+                    actionPatterns = [];
+                    console.log(`🔧 Initializing action patterns array for ${rivalId}`);
+                }
+                
+                try {
                     actionPatterns.push({
                         timestamp: sessionData.actionTimestamp,
                         type: sessionData.actionType || 'unknown',
@@ -433,6 +466,10 @@ class SmartAdaptiveTimingPredictor {
                     }
                     
                     this.enhancedAnalysis.actionTimingPatterns.set(rivalId, actionPatterns);
+                } catch (pushError) {
+                    console.log(`⚠️ Error pushing to action patterns for ${rivalId}: ${pushError.message}`);
+                    // Reinitialize array if push fails
+                    this.enhancedAnalysis.actionTimingPatterns.set(rivalId, []);
                 }
             }
             
@@ -565,24 +602,47 @@ class SmartAdaptiveTimingPredictor {
      * **NEW: UPDATE SWEET SPOT**
      */
     updateSweetSpot(rivalId, timing, mode) {
-        const sweetSpot = this.enhancedAnalysis.sweetSpots.get(rivalId) || {
-            attack: [],
-            defense: [],
-            optimal: { attack: null, defense: null }
-        };
-        
-        sweetSpot[mode].push({
-            timing,
-            timestamp: Date.now(),
-            success: null // Will be updated when we get feedback
-        });
-        
-        // Keep only recent timings
-        if (sweetSpot[mode].length > 10) {
-            sweetSpot[mode] = sweetSpot[mode].slice(-10);
+        // **ENHANCED SAFETY**: Ensure sweetSpots Map exists
+        if (!this.enhancedAnalysis.sweetSpots) {
+            this.enhancedAnalysis.sweetSpots = new Map();
+            console.log(`🔧 Initializing sweetSpots Map`);
         }
         
-        this.enhancedAnalysis.sweetSpots.set(rivalId, sweetSpot);
+        let sweetSpot = this.enhancedAnalysis.sweetSpots.get(rivalId);
+        if (!sweetSpot) {
+            sweetSpot = {
+                attack: [],
+                defense: [],
+                optimal: { attack: null, defense: null }
+            };
+            console.log(`🔧 Initializing sweet spot data for ${rivalId}`);
+        }
+        
+        // **ENHANCED SAFETY**: Ensure mode array exists and is array
+        if (!sweetSpot[mode] || !Array.isArray(sweetSpot[mode])) {
+            sweetSpot[mode] = [];
+            console.log(`🔧 Initializing sweet spot ${mode} array for ${rivalId}`);
+        }
+        
+        try {
+            sweetSpot[mode].push({
+                timing,
+                timestamp: Date.now(),
+                success: null // Will be updated when we get feedback
+            });
+            
+            // Keep only recent timings
+            if (sweetSpot[mode].length > 10) {
+                sweetSpot[mode] = sweetSpot[mode].slice(-10);
+            }
+            
+            this.enhancedAnalysis.sweetSpots.set(rivalId, sweetSpot);
+        } catch (pushError) {
+            console.log(`⚠️ Error pushing to sweet spot ${mode} for ${rivalId}: ${pushError.message}`);
+            // Reinitialize array if push fails
+            sweetSpot[mode] = [];
+            this.enhancedAnalysis.sweetSpots.set(rivalId, sweetSpot);
+        }
     }
     
     /**
@@ -596,10 +656,22 @@ class SmartAdaptiveTimingPredictor {
         this.adaptiveSystem.lastViolationTime = Date.now();
         
         // Add to violation history
-        this.adaptiveSystem.violationHistory.push({
-            rivalId,
-            timestamp: Date.now()
-        });
+        // **ENHANCED SAFETY**: Ensure violationHistory exists and is array
+        if (!this.adaptiveSystem.violationHistory || !Array.isArray(this.adaptiveSystem.violationHistory)) {
+            this.adaptiveSystem.violationHistory = [];
+            console.log(`🔧 Initializing violationHistory array`);
+        }
+        
+        try {
+            this.adaptiveSystem.violationHistory.push({
+                rivalId,
+                timestamp: Date.now()
+            });
+        } catch (pushError) {
+            console.log(`⚠️ Error pushing to violationHistory: ${pushError.message}`);
+            // Reinitialize array if push fails
+            this.adaptiveSystem.violationHistory = [];
+        }
         
         // Clean old violations (older than 10 minutes)
         this.adaptiveSystem.violationHistory = this.adaptiveSystem.violationHistory.filter(
@@ -805,32 +877,60 @@ class SmartAdaptiveTimingPredictor {
                 return;
             }
             
+            // **ENHANCED SAFETY**: Initialize all required Maps if they don't exist
+            if (!this.enhancedAnalysis.reactionTimeProfiles) {
+                this.enhancedAnalysis.reactionTimeProfiles = new Map();
+            }
+            if (!this.enhancedAnalysis.movementPatterns) {
+                this.enhancedAnalysis.movementPatterns = new Map();
+            }
+            if (!this.enhancedAnalysis.sessionCorrelation) {
+                this.enhancedAnalysis.sessionCorrelation = new Map();
+            }
+            
             // **REACTION TIME ANALYSIS**
-            const reactionTimes = this.enhancedAnalysis.reactionTimeProfiles.get(rivalId) || [];
-            if (sessionData.lastReactionTime && Array.isArray(reactionTimes)) {
-                reactionTimes.push({
-                    time: sessionData.lastReactionTime,
-                    timestamp: Date.now(),
-                    context: sessionData.actionContext || 'unknown'
-                });
-                
-                // Keep only last 15 reaction times
-                if (reactionTimes.length > 15) {
-                    reactionTimes.splice(0, reactionTimes.length - 15);
+            let reactionTimes = this.enhancedAnalysis.reactionTimeProfiles.get(rivalId);
+            if (!reactionTimes || !Array.isArray(reactionTimes)) {
+                reactionTimes = [];
+                console.log(`🔧 Initializing reaction times array for ${rivalId}`);
+            }
+            
+            if (sessionData.lastReactionTime) {
+                try {
+                    reactionTimes.push({
+                        time: sessionData.lastReactionTime,
+                        timestamp: Date.now(),
+                        context: sessionData.actionContext || 'unknown'
+                    });
+                    
+                    // Keep only last 15 reaction times
+                    if (reactionTimes.length > 15) {
+                        reactionTimes.splice(0, reactionTimes.length - 15);
+                    }
+                    
+                    this.enhancedAnalysis.reactionTimeProfiles.set(rivalId, reactionTimes);
+                } catch (pushError) {
+                    console.log(`⚠️ Error pushing to reaction times for ${rivalId}: ${pushError.message}`);
+                    // Reinitialize array if push fails
+                    this.enhancedAnalysis.reactionTimeProfiles.set(rivalId, []);
                 }
-                
-                this.enhancedAnalysis.reactionTimeProfiles.set(rivalId, reactionTimes);
             }
             
             // **MOVEMENT PATTERN ANALYSIS**
             if (sessionData.movementData) {
-                const movementPatterns = this.enhancedAnalysis.movementPatterns.get(rivalId) || {
-                    consistency: [],
-                    speed: [],
-                    predictability: 0
-                };
+                let movementPatterns = this.enhancedAnalysis.movementPatterns.get(rivalId);
                 
-                // **SAFETY CHECK**: Ensure arrays exist
+                // **ENHANCED SAFETY**: Initialize movement patterns if missing
+                if (!movementPatterns) {
+                    movementPatterns = {
+                        consistency: [],
+                        speed: [],
+                        predictability: 0
+                    };
+                    console.log(`🔧 Initializing movement patterns for ${rivalId}`);
+                }
+                
+                // **SAFETY CHECK**: Ensure arrays exist and are arrays
                 if (!Array.isArray(movementPatterns.consistency)) {
                     movementPatterns.consistency = [];
                 }
@@ -838,25 +938,33 @@ class SmartAdaptiveTimingPredictor {
                     movementPatterns.speed = [];
                 }
                 
-                movementPatterns.consistency.push(sessionData.movementData.consistency || 0.5);
-                movementPatterns.speed.push(sessionData.movementData.speed || 0.5);
-                
-                // Keep only last 10 movement samples
-                if (movementPatterns.consistency.length > 10) {
-                    movementPatterns.consistency = movementPatterns.consistency.slice(-10);
-                    movementPatterns.speed = movementPatterns.speed.slice(-10);
+                try {
+                    movementPatterns.consistency.push(sessionData.movementData.consistency || 0.5);
+                    movementPatterns.speed.push(sessionData.movementData.speed || 0.5);
+                    
+                    // Keep only last 10 movement samples
+                    if (movementPatterns.consistency.length > 10) {
+                        movementPatterns.consistency = movementPatterns.consistency.slice(-10);
+                        movementPatterns.speed = movementPatterns.speed.slice(-10);
+                    }
+                    
+                    // Calculate movement predictability (with safety checks)
+                    const avgConsistency = movementPatterns.consistency.length > 0 ? 
+                        movementPatterns.consistency.reduce((a, b) => a + b, 0) / movementPatterns.consistency.length : 0.5;
+                    const avgSpeed = movementPatterns.speed.length > 0 ? 
+                        movementPatterns.speed.reduce((a, b) => a + b, 0) / movementPatterns.speed.length : 0.5;
+                    movementPatterns.predictability = (avgConsistency + avgSpeed) / 2;
+                    
+                    this.enhancedAnalysis.movementPatterns.set(rivalId, movementPatterns);
+                    
+                    console.log(`📊 Movement Analysis: ${rivalProfile.rivalName || 'Unknown'} predictability: ${(movementPatterns.predictability * 100).toFixed(1)}%`);
+                } catch (pushError) {
+                    console.log(`⚠️ Error pushing to movement patterns for ${rivalId}: ${pushError.message}`);
+                    // Reinitialize arrays if push fails
+                    movementPatterns.consistency = [];
+                    movementPatterns.speed = [];
+                    this.enhancedAnalysis.movementPatterns.set(rivalId, movementPatterns);
                 }
-                
-                // Calculate movement predictability (with safety checks)
-                const avgConsistency = movementPatterns.consistency.length > 0 ? 
-                    movementPatterns.consistency.reduce((a, b) => a + b, 0) / movementPatterns.consistency.length : 0.5;
-                const avgSpeed = movementPatterns.speed.length > 0 ? 
-                    movementPatterns.speed.reduce((a, b) => a + b, 0) / movementPatterns.speed.length : 0.5;
-                movementPatterns.predictability = (avgConsistency + avgSpeed) / 2;
-                
-                this.enhancedAnalysis.movementPatterns.set(rivalId, movementPatterns);
-                
-                console.log(`📊 Movement Analysis: ${rivalProfile.rivalName || 'Unknown'} predictability: ${(movementPatterns.predictability * 100).toFixed(1)}%`);
             }
         } catch (error) {
             console.log(`⚠️ Enhanced analysis error for ${rivalId}: ${error.message}`);
@@ -881,11 +989,22 @@ class SmartAdaptiveTimingPredictor {
                 isLikelyHuman: sessionData.isLikelyHuman || 0.5
             };
             
-            sessionCorrelation.sessionTimes.push(currentSession);
-            
-            // Keep only last 20 sessions for correlation
-            if (sessionCorrelation.sessionTimes.length > 20) {
-                sessionCorrelation.sessionTimes = sessionCorrelation.sessionTimes.slice(-20);
+            try {
+                // **ENHANCED SAFETY**: Ensure sessionTimes is an array
+                if (!Array.isArray(sessionCorrelation.sessionTimes)) {
+                    sessionCorrelation.sessionTimes = [];
+                    console.log(`🔧 Initializing sessionTimes array for ${rivalId}`);
+                }
+                
+                sessionCorrelation.sessionTimes.push(currentSession);
+                
+                // Keep only last 20 sessions for correlation
+                if (sessionCorrelation.sessionTimes.length > 20) {
+                    sessionCorrelation.sessionTimes = sessionCorrelation.sessionTimes.slice(-20);
+                }
+            } catch (pushError) {
+                console.log(`⚠️ Error pushing to session times for ${rivalId}: ${pushError.message}`);
+                sessionCorrelation.sessionTimes = [];
             }
             
             // Calculate behavior consistency across sessions (FIXED FOR EDGE CASES)
@@ -979,6 +1098,46 @@ class SmartAdaptiveTimingPredictor {
             emergencyModeActive: this.counterIntelligence.emergencyModeActive,
             chaosMode: this.defensiveSystem.chaosMode
         };
+    }
+    
+    /**
+     * **NEW: Apply immediate timing adjustment for 3-second rule recovery**
+     */
+    applyImmediateAdjustment(rivalId, adjustmentAmount) {
+        try {
+            const rivalProfile = this.getRivalProfile(rivalId, 'unknown');
+            if (!rivalProfile) {
+                console.log(`⚠️ applyImmediateAdjustment: No profile found for ${rivalId}`);
+                return;
+            }
+            
+            // **ENHANCED SAFETY**: Ensure immediateAdjustments array exists
+            if (!rivalProfile.immediateAdjustments || !Array.isArray(rivalProfile.immediateAdjustments)) {
+                rivalProfile.immediateAdjustments = [];
+                console.log(`🔧 Initializing immediateAdjustments array for ${rivalId}`);
+            }
+            
+            try {
+                rivalProfile.immediateAdjustments.push({
+                    amount: adjustmentAmount,
+                    timestamp: Date.now(),
+                    reason: '3second_rule_recovery'
+                });
+                
+                // Keep only recent adjustments (last 5)
+                if (rivalProfile.immediateAdjustments.length > 5) {
+                    rivalProfile.immediateAdjustments = rivalProfile.immediateAdjustments.slice(-5);
+                }
+                
+                console.log(`⚡ Immediate adjustment applied: ${rivalId} +${adjustmentAmount}ms`);
+            } catch (pushError) {
+                console.log(`⚠️ Error pushing to immediate adjustments for ${rivalId}: ${pushError.message}`);
+                // Reinitialize array if push fails
+                rivalProfile.immediateAdjustments = [];
+            }
+        } catch (error) {
+            console.log(`❌ Error applying immediate adjustment: ${error.message}`);
+        }
     }
     
     /**
@@ -1119,17 +1278,29 @@ class SmartAdaptiveTimingPredictor {
     trackOurTiming(timing, mode, rivalId) {
         const now = Date.now();
         
-        // Store in main timing history
-        this.defensiveSystem.myTimingHistory.push({
-            timing,
-            mode,
-            rivalId,
-            timestamp: now
-        });
+        // **ENHANCED SAFETY**: Ensure myTimingHistory exists and is array
+        if (!this.defensiveSystem.myTimingHistory || !Array.isArray(this.defensiveSystem.myTimingHistory)) {
+            this.defensiveSystem.myTimingHistory = [];
+            console.log(`🔧 Initializing myTimingHistory array`);
+        }
         
-        // Keep only recent history (last 20 timings)
-        if (this.defensiveSystem.myTimingHistory.length > 20) {
-            this.defensiveSystem.myTimingHistory = this.defensiveSystem.myTimingHistory.slice(-20);
+        try {
+            // Store in main timing history
+            this.defensiveSystem.myTimingHistory.push({
+                timing,
+                mode,
+                rivalId,
+                timestamp: now
+            });
+            
+            // Keep only recent history (last 20 timings)
+            if (this.defensiveSystem.myTimingHistory.length > 20) {
+                this.defensiveSystem.myTimingHistory = this.defensiveSystem.myTimingHistory.slice(-20);
+            }
+        } catch (pushError) {
+            console.log(`⚠️ Error pushing to myTimingHistory: ${pushError.message}`);
+            // Reinitialize array if push fails
+            this.defensiveSystem.myTimingHistory = [];
         }
         
         // Track per-rival timing history
@@ -1137,12 +1308,26 @@ class SmartAdaptiveTimingPredictor {
             this.defensiveSystem.lastUsedTimings.set(rivalId, []);
         }
         
-        const rivalTimings = this.defensiveSystem.lastUsedTimings.get(rivalId);
-        rivalTimings.push({ timing, timestamp: now });
+        let rivalTimings = this.defensiveSystem.lastUsedTimings.get(rivalId);
         
-        // Keep only last 5 timings per rival
-        if (rivalTimings.length > 5) {
-            rivalTimings.splice(0, rivalTimings.length - 5);
+        // **ENHANCED SAFETY**: Ensure rivalTimings is array
+        if (!rivalTimings || !Array.isArray(rivalTimings)) {
+            rivalTimings = [];
+            console.log(`🔧 Initializing rivalTimings array for ${rivalId}`);
+            this.defensiveSystem.lastUsedTimings.set(rivalId, rivalTimings);
+        }
+        
+        try {
+            rivalTimings.push({ timing, timestamp: now });
+            
+            // Keep only last 5 timings per rival
+            if (rivalTimings.length > 5) {
+                rivalTimings.splice(0, rivalTimings.length - 5);
+            }
+        } catch (pushError) {
+            console.log(`⚠️ Error pushing to rivalTimings for ${rivalId}: ${pushError.message}`);
+            // Reinitialize array if push fails
+            this.defensiveSystem.lastUsedTimings.set(rivalId, []);
         }
     }
     
@@ -1234,6 +1419,47 @@ class SmartAdaptiveTimingPredictor {
         // Save data periodically
         if (rivalProfile.sessionHistory.length % 5 === 0) {
             this.saveData();
+        }
+    }
+    
+    /**
+     * **NEW: RECORD RIVAL TIMING (Referenced by galaxy_1.js)**
+     * Record observed timing from rival for learning purposes
+     */
+    recordRivalTiming(rivalId, observedTiming) {
+        try {
+            const rivalProfile = this.getRivalProfile(rivalId, 'unknown');
+            if (!rivalProfile) {
+                console.log(`⚠️ recordRivalTiming: No profile found for ${rivalId}`);
+                return;
+            }
+            
+            // **ENHANCED SAFETY**: Ensure observedTimings array exists
+            if (!rivalProfile.observedTimings || !Array.isArray(rivalProfile.observedTimings)) {
+                rivalProfile.observedTimings = [];
+                console.log(`🔧 Initializing observedTimings array for ${rivalId}`);
+            }
+            
+            try {
+                rivalProfile.observedTimings.push({
+                    timing: observedTiming,
+                    timestamp: Date.now(),
+                    source: 'observed_gameplay'
+                });
+                
+                // Keep only recent timings (last 20)
+                if (rivalProfile.observedTimings.length > 20) {
+                    rivalProfile.observedTimings = rivalProfile.observedTimings.slice(-20);
+                }
+                
+                console.log(`⏱️ Recorded rival timing: ${rivalId} = ${observedTiming}ms (total observations: ${rivalProfile.observedTimings.length})`);
+            } catch (pushError) {
+                console.log(`⚠️ Error pushing to observedTimings for ${rivalId}: ${pushError.message}`);
+                // Reinitialize array if push fails
+                rivalProfile.observedTimings = [];
+            }
+        } catch (error) {
+            console.log(`❌ Error recording rival timing: ${error.message}`);
         }
     }
     
@@ -1846,18 +2072,38 @@ class AdaptationEngine {
     async processOutcome(rivalProfile, outcome) {
         const rivalId = rivalProfile.rivalId;
         
+        // **ENHANCED SAFETY**: Validate inputs
+        if (!rivalProfile || !rivalId || !outcome) {
+            console.log(`⚠️ processOutcome: Invalid inputs for ${rivalId}`);
+            return;
+        }
+        
         if (!this.adaptationHistory.has(rivalId)) {
             this.adaptationHistory.set(rivalId, []);
         }
         
-        const history = this.adaptationHistory.get(rivalId);
-        history.push(outcome);
+        let history = this.adaptationHistory.get(rivalId);
         
-        if (history.length > 20) {
-            history.shift();
+        // **ENHANCED SAFETY**: Ensure history is array
+        if (!history || !Array.isArray(history)) {
+            history = [];
+            console.log(`🔧 Initializing adaptation history array for ${rivalId}`);
+            this.adaptationHistory.set(rivalId, history);
         }
         
-        this.adaptRivalStrategy(rivalProfile, history);
+        try {
+            history.push(outcome);
+            
+            if (history.length > 20) {
+                history.shift();
+            }
+            
+            this.adaptRivalStrategy(rivalProfile, history);
+        } catch (pushError) {
+            console.log(`⚠️ Error pushing to adaptation history for ${rivalId}: ${pushError.message}`);
+            // Reinitialize array if push fails
+            this.adaptationHistory.set(rivalId, []);
+        }
     }
     
     adaptRivalStrategy(rivalProfile, history) {
