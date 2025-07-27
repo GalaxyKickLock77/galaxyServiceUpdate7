@@ -9,10 +9,6 @@ const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 const io = require('socket.io-client');
 const SmartAdaptiveTimingPredictor = require('./smart_adaptive_ai_timing_predictor');
-const GalaxyServiceImprovement = require('./galaxy_integration_improvements');
-
-// Initialize Galaxy Service Improvement System
-let galaxyImprovement = null;
 let lastKickedRival = null;
 let lastPredictedTiming = null;
 
@@ -139,16 +135,6 @@ async function gracefulShutdown(signal) {
     console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
     
     try {
-        // Use enhanced shutdown if available
-        if (galaxyImprovement && typeof galaxyImprovement.enhancedShutdown === 'function') {
-            console.log('🚀 Using Galaxy Service Improvement enhanced shutdown...');
-            await galaxyImprovement.enhancedShutdown(signal);
-            return; // Enhanced shutdown handles everything
-        }
-        
-        // Fallback to original shutdown process
-        console.log('📋 Using fallback shutdown process...');
-        
         // Clear all timeouts and intervals
         shutdownTimeouts.forEach(id => originalClearTimeout(id));
         shutdownIntervals.forEach(id => originalClearInterval(id));
@@ -488,136 +474,122 @@ function processThreeSecondRuleRecovery(rivalId, predictedTiming, isThreeSecondR
 // Rival activity tracking system
 let rivalActivityProfiles = new Map(); // rivalId -> activity profile
 
-// Track rival activity for AI prediction enhancement - ENHANCED WITH MEMORY MANAGEMENT
+// Track rival activity for AI prediction enhancement
 function trackRivalActivity(rivalId, activityType, data = {}) {
-    // Use the safe memory-managed version if available
-    if (galaxyImprovement && galaxyImprovement.safeAddToRivalActivityProfiles) {
-        const profile = rivalActivityProfiles.get(rivalId) || {
+    if (!rivalActivityProfiles.has(rivalId)) {
+        rivalActivityProfiles.set(rivalId, {
             activities: [],
             movements: [],
             interactions: [],
             loginTime: Date.now(),
-            sessionDuration: 0,
+            sessionDuration: 0, // Will be calculated only when session ends
+            
+            // **NEW: HUMAN DETECTION FIELDS**
             lastActivityTime: Date.now(),
             activityIntervals: [],
             responseDelays: [],
             movementVariability: [],
             interactionComplexity: 0
-        };
-        
-        // Update profile data
-        const timestamp = Date.now();
-        switch (activityType) {
-            case 'activity':
-                // CRITICAL: Update loginTime if this is a new join activity (rival rejoining)
-                if (data.type === 'join') {
-                    const newLoginTime = Date.now();
-                    profile.activities = [];
-                    profile.movements = [];
-                    profile.interactions = [];
-                    profile.loginTime = newLoginTime;
-                    profile.sessionDuration = 0;
-                    profile.lastActivityTime = newLoginTime;
-                    profile.activityIntervals = [];
-                    profile.responseDelays = [];
-                    profile.movementVariability = [];
-                    profile.interactionComplexity = 0;
-                    appLog(`🔄 Activity Profile Reset: ${rivalId} rejoined - new loginTime: ${newLoginTime}`);
-                }
-                
-                if (profile.lastActivityTime) {
-                    const interval = timestamp - profile.lastActivityTime;
-                    profile.activityIntervals.push(interval);
-                    if (profile.activityIntervals.length > 20) {
-                        profile.activityIntervals = profile.activityIntervals.slice(-20);
-                    }
-                }
-                profile.activities.push({ 
-                    timestamp, 
-                    level: data.level || Math.random(),
-                    intensity: data.intensity || Math.random(),
-                    ...data 
-                });
-                if (profile.activities.length > 50) {
-                    profile.activities = profile.activities.slice(-50);
-                }
-                profile.lastActivityTime = timestamp;
-                break;
-                
-            case 'movement':
-                const movementDelay = data.delay || (timestamp - (data.lastMovement || timestamp));
-                profile.movementVariability.push(movementDelay);
-                if (profile.movementVariability.length > 15) {
-                    profile.movementVariability = profile.movementVariability.slice(-15);
-                }
-                profile.movements.push({ 
-                    timestamp, 
-                    instant: movementDelay < 50,
-                    delay: movementDelay, 
-                    towardExit: data.towardExit || false,
-                    ...data 
-                });
-                if (profile.movements.length > 30) {
-                    profile.movements = profile.movements.slice(-30);
-                }
-                break;
-                
-            case 'interaction':
-                const responseTime = data.responseTime || 200;
-                profile.responseDelays.push(responseTime);
-                if (profile.responseDelays.length > 10) {
-                    profile.responseDelays = profile.responseDelays.slice(-10);
-                }
-                if (responseTime > 150) profile.interactionComplexity += 1;
-                if (data.complex) profile.interactionComplexity += 2;
-                profile.interactions.push({ 
-                    timestamp, 
-                    responseTime, 
-                    complex: data.complex || false,
-                    ...data 
-                });
-                if (profile.interactions.length > 20) {
-                    profile.interactions = profile.interactions.slice(-20);
-                }
-                break;
-        }
-        
-        // Safely add to map with memory management
-        galaxyImprovement.safeAddToRivalActivityProfiles(rivalId, profile);
+        });
     } else {
-        // Fallback to original logic if improvement system not available
-        if (!rivalActivityProfiles.has(rivalId)) {
-            rivalActivityProfiles.set(rivalId, {
-                activities: [],
-                movements: [],
-                interactions: [],
-                loginTime: Date.now(),
-                sessionDuration: 0,
-                lastActivityTime: Date.now(),
-                activityIntervals: [],
-                responseDelays: [],
-                movementVariability: [],
-                interactionComplexity: 0
-            });
-        }
-        
-        const profile = rivalActivityProfiles.get(rivalId);
-        const timestamp = Date.now();
-        
-        // Fallback processing
-        switch (activityType) {
-            case 'activity':
-                profile.activities.push({ timestamp, ...data });
-                profile.lastActivityTime = timestamp;
-                break;
-            case 'movement':
-                profile.movements.push({ timestamp, ...data });
-                break;
-            case 'interaction':
-                profile.interactions.push({ timestamp, ...data });
-                break;
+        // CRITICAL: Update loginTime if this is a new join activity (rival rejoining)
+        if (activityType === 'activity' && data.type === 'join') {
+            const profile = rivalActivityProfiles.get(rivalId);
+            const newLoginTime = Date.now();
+            
+            // Clear previous session data for the new session
+            profile.activities = [];
+            profile.movements = [];
+            profile.interactions = [];
+            profile.loginTime = newLoginTime;
+            profile.sessionDuration = 0; // Reset to 0 for new session
+            profile.lastActivityTime = newLoginTime;
+            profile.activityIntervals = [];
+            profile.responseDelays = [];
+            profile.movementVariability = [];
+            profile.interactionComplexity = 0;
+            
+            appLog(`🔄 Activity Profile Reset: ${rivalId} rejoined - new loginTime: ${newLoginTime}`);
         }
     }
+    
+    const profile = rivalActivityProfiles.get(rivalId);
+    const timestamp = Date.now();
+    
+    // **ENHANCED ACTIVITY TRACKING WITH HUMAN DETECTION**
+    switch (activityType) {
+        case 'activity':
+            // Track timing intervals for human detection
+            if (profile.lastActivityTime) {
+                const interval = timestamp - profile.lastActivityTime;
+                profile.activityIntervals.push(interval);
+                if (profile.activityIntervals.length > 20) {
+                    profile.activityIntervals = profile.activityIntervals.slice(-20);
+                }
+            }
+            
+            profile.activities.push({ 
+                timestamp, 
+                level: data.level || Math.random(), // Activity intensity
+                intensity: data.intensity || Math.random(),
+                ...data 
+            });
+            
+            // Keep only recent activities (last 50)
+            if (profile.activities.length > 50) {
+                profile.activities = profile.activities.slice(-50);
+            }
+            profile.lastActivityTime = timestamp;
+            break;
+            
+        case 'movement':
+            // Track movement timing and patterns
+            const movementDelay = data.delay || (timestamp - (data.lastMovement || timestamp));
+            profile.movementVariability.push(movementDelay);
+            if (profile.movementVariability.length > 15) {
+                profile.movementVariability = profile.movementVariability.slice(-15);
+            }
+            
+            profile.movements.push({ 
+                timestamp, 
+                instant: movementDelay < 50, // Movements under 50ms are likely bot
+                delay: movementDelay,
+                towardExit: data.towardExit || false,
+                ...data 
+            });
+            
+            if (profile.movements.length > 30) {
+                profile.movements = profile.movements.slice(-30);
+            }
+            break;
+            
+        case 'interaction':
+            // Track interaction complexity and response times
+            const responseTime = data.responseTime || 200;
+            profile.responseDelays.push(responseTime);
+            if (profile.responseDelays.length > 10) {
+                profile.responseDelays = profile.responseDelays.slice(-10);
+            }
+            
+            // Increase complexity score for varied interactions
+            if (responseTime > 150) profile.interactionComplexity += 1;
+            if (data.complex) profile.interactionComplexity += 2;
+            
+            profile.interactions.push({ 
+                timestamp, 
+                responseTime,
+                complex: data.complex || false,
+                ...data 
+            });
+            
+            if (profile.interactions.length > 20) {
+                profile.interactions = profile.interactions.slice(-20);
+            }
+            break;
+    }
+    
+    // REMOVED: Continuous session duration calculation
+    // Session duration will only be calculated when the session actually ends (PART/SLEEP/KICK)
 }
 
 // 2. HUMAN DETECTION HELPER FUNCTIONS
@@ -1222,29 +1194,6 @@ class MLDataLogger {
 // Initialize ML data logger
 const mlDataLogger = new MLDataLogger();
 
-// Initialize Galaxy Service Improvement System
-async function initializeGalaxyImprovement() {
-    try {
-        galaxyImprovement = new GalaxyServiceImprovement();
-        
-        // Set up global references for the improvement system
-        global.rivalActivityProfiles = rivalActivityProfiles;
-        global.trackedRivals = trackedRivals;
-        global.userMap = userMap;
-        global.detectionCache = detectionCache;
-        global.config = config;
-        
-        // Initialize the system
-        await galaxyImprovement.initialize();
-        
-        appLog('🚀 Galaxy Service Improvement System fully integrated');
-        
-    } catch (error) {
-        appLog('❌ Failed to initialize Galaxy Service Improvement:', error.message);
-        // Continue without the improvement system if initialization fails
-    }
-}
-
 // AI-specific error handling (moved to main shutdown handler)
 
 // Initialize system startup check
@@ -1280,33 +1229,7 @@ setTimeout(() => {
     
     appLog(`🧪 Detection Test: Human=${(testHuman * 100).toFixed(1)}%, Bot=${(testBot * 100).toFixed(1)}%`);
     
-    // Initialize Galaxy Service Improvement System
-    initializeGalaxyImprovement();
-    
 }, 6000); // 6 seconds after startup to ensure all systems are loaded
-
-// PATCH 7: STARTUP VERIFICATION - Add system verification after integration (FROM INTEGRATION PATCH)
-setTimeout(() => {
-    appLog('🔍 System verification after integration:');
-    if (galaxyImprovement) {
-        appLog(`✅ Memory Manager: ${galaxyImprovement.memoryManager ? 'Active' : 'Inactive'}`);
-        appLog(`✅ Error Handler: ${galaxyImprovement.errorHandler ? 'Active' : 'Inactive'}`);
-        appLog(`✅ Improved AI Predictor: ${galaxyImprovement.improvedAIPredictor && galaxyImprovement.improvedAIPredictor.initialized ? 'Active' : 'Inactive'}`);
-        appLog(`✅ Configuration Validation: ${galaxyImprovement.configValidator && galaxyImprovement.configValidator.initialized ? 'Active' : 'Inactive'}`);
-        
-        // Report memory limits
-        if (galaxyImprovement.memoryManager) {
-            try {
-                const usage = galaxyImprovement.memoryManager.getMemoryUsage();
-                appLog(`📊 Memory limits enforced:`, Object.keys(usage));
-            } catch (error) {
-                appLog(`📊 Memory limits enforced: Available`);
-            }
-        }
-    } else {
-        appLog(`❌ Galaxy Service Improvement System: Not Available (fallback mode active)`);
-    }
-}, 10000); // 10 seconds after startup
 
 // Enhanced flag reset function with prison recovery
 function resetProcessingFlag() {
@@ -1367,20 +1290,11 @@ setInterval(() => {
 let trackedRivals = new Map(); // Map of rivalId -> { name, loginTime, mode, connection, coordinate, kickTimeout, presenceCheckTimeout }
 
 
-// Memory optimization constants - ENHANCED
+// Memory optimization constants
 const MAX_USER_MAP_SIZE = 1000;
 const MAX_TRACKED_RIVALS = 50;
-const MAX_RIVAL_ACTIVITY_PROFILES = 500; // NEW: Limit for activity profiles
 const MEMORY_CLEANUP_INTERVAL = 60000; // 60 seconds (adaptive)
-const RIVAL_EXPIRE_TIME = 1800000; // 30 minutes (increased from 5)
-const ACTIVITY_PROFILE_MAX_AGE = 1800000; // 30 minutes
-
-// NEW: Batch processing synchronization
-let batchProcessing = false;
-let memoryCleanupInProgress = false;
-
-// NEW: Reverse lookup map for performance
-const userIdToNameMap = new Map();
+const RIVAL_EXPIRE_TIME = 300000; // 5 minutes
 
 // Timing precision enhancement
 let timingDriftCorrection = 0;
@@ -1476,47 +1390,6 @@ function updateTimingStats(actualDelay, expectedDelay) {
 // Performance monitoring and cleanup intervals
 setInterval(performMemoryCleanup, MEMORY_CLEANUP_INTERVAL);
 setInterval(measureTimingDrift, 300000); // Every 5 minutes
-
-// PATCH 5: PERFORMANCE MONITORING - Add system status reporting (FROM INTEGRATION PATCH)
-setInterval(() => {
-    if (galaxyImprovement && typeof galaxyImprovement.getSystemStatus === 'function') {
-        try {
-            const status = galaxyImprovement.getSystemStatus();
-            
-            // Log warnings for high resource usage
-            if (status.memoryManager && status.memoryManager.usage) {
-                for (const [mapName, usage] of Object.entries(status.memoryManager.usage)) {
-                    if (parseFloat(usage.percentage) > 80) {
-                        appLog(`🚨 High memory usage: ${mapName} at ${usage.percentage}`);
-                    }
-                }
-            }
-            
-            // Log error count increases
-            if (status.errorHandler && status.errorHandler.stats && status.errorHandler.stats.totalErrors > 0) {
-                const recentErrors = status.errorHandler.stats.recentErrors.length;
-                if (recentErrors > 5) { // More than 5 recent errors
-                    appLog(`⚠️ High error rate: ${recentErrors} recent errors`);
-                }
-            }
-        } catch (error) {
-            // Don't log monitoring errors unless debugging
-        }
-    }
-}, 300000); // Every 5 minutes
-
-// PATCH 6: AI PREDICTOR CLEANUP - Add to existing cleanup intervals (FROM INTEGRATION PATCH)
-setInterval(() => {
-    // Clean up AI predictor memory if available
-    if (galaxyImprovement && galaxyImprovement.improvedAIPredictor && 
-        typeof galaxyImprovement.improvedAIPredictor.performMemoryOptimization === 'function') {
-        try {
-            galaxyImprovement.improvedAIPredictor.performMemoryOptimization();
-        } catch (error) {
-            // Silent error handling for memory cleanup
-        }
-    }
-}, 60000); // Every minute
 
 // AI Predictor performance monitoring
 setInterval(async () => {
@@ -2213,113 +2086,95 @@ function incrementTiming(mode, connection, errorType = 'success') {
     return modeState.currentTime;
 }
 
-// ENHANCED getCurrentTiming with comprehensive error handling - FROM INTEGRATION PATCH
 async function getCurrentTiming(mode, connection, rivalId = null, rivalName = null, loginTime = null) {
-    try {
-        // Use improved AI predictor if available
-        if (galaxyImprovement && galaxyImprovement.improvedAIPredictor && 
-            galaxyImprovement.improvedAIPredictor.initialized && rivalId && rivalName && loginTime) {
-            try {
-                const sessionData = {
-                    activityLevel: getRivalActivityLevel(rivalId) || 0.7,
-                    movementFreq: getRivalMovementFreq(rivalId) || 0.5,
-                    interactionRate: getRivalInteractionRate(rivalId) || 0.6,
-                    networkLatency: connection.lastPingTime || 50,
-                    systemLoad: getSystemLoad(),
-                    currentTime: Date.now(),
-                    sessionDuration: loginTime ? Date.now() - loginTime : 2000,
-                    isLikelyHuman: rivalId ? assessHumanLikelihood(rivalId, rivalName, loginTime) : 0.7,
-                    
-                    // Enhanced human detection
-                    hasVariableDelay: checkVariableHumanDelay(rivalId),
-                    showsHumanPatterns: detectHumanInteractionPatterns(rivalId),
-                    hasNaturalActivity: checkNaturalActivityPattern(rivalId)
-                };
+    // If AI predictor is enabled and we have rival data, use AI prediction
+    if (aiPredictorEnabled && rivalId && rivalName && loginTime) {
+        try {
+            // **ENHANCED SESSION DATA WITH HUMAN DETECTION**
+            const sessionData = {
+                activityLevel: getRivalActivityLevel(rivalId) || 0.7,
+                movementFreq: getRivalMovementFreq(rivalId) || 0.5,
+                interactionRate: getRivalInteractionRate(rivalId) || 0.6,
+                networkLatency: connection.lastPingTime || 50,
+                systemLoad: getSystemLoad(),
+                currentTime: Date.now(),
                 
-                const aiTiming = await galaxyImprovement.improvedAIPredictor.predictOptimalTiming(
-                    rivalId, rivalName, loginTime, mode, sessionData
-                );
+                // **CRITICAL HUMAN DETECTION ENHANCEMENTS**
+                sessionDuration: Date.now() - loginTime,
+                connectionSpeed: connection.lastPingTime <= 10 ? 'instant' : 'normal',
+                rivalActivityProfile: rivalActivityProfiles.get(rivalId),
+                isQuickSession: (Date.now() - loginTime) < 1000,
+                isPerfectActivity: getRivalActivityLevel(rivalId) === 1.0,
+                hasInstantMovements: getRivalMovementFreq(rivalId) >= 0.95,
                 
-                // Apply timing constraints
-                const constrainedTiming = applyTimingConstraints(aiTiming, mode);
-                appLog(`🎯 Enhanced AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms`);
-                return constrainedTiming;
-                
-            } catch (aiError) {
-                appLog(`⚠️ Enhanced AI predictor error, falling back to original AI: ${aiError.message}`);
-                // Fall through to original AI logic
+                // **NEW: HUMAN BEHAVIOR INDICATORS**
+                hasVariableDelay: checkVariableHumanDelay(rivalId),
+                showsHumanPatterns: detectHumanInteractionPatterns(rivalId),
+                hasNaturalActivity: checkNaturalActivityPattern(rivalId),
+                isLikelyHuman: assessHumanLikelihood(rivalId, rivalName, loginTime)
+            };
+            
+            const aiPrediction = await aiPredictor.predictOptimalTiming(
+                rivalId, 
+                rivalName, 
+                loginTime, 
+                mode, 
+                sessionData
+            );
+            
+            // **HUMAN PROTECTION LAYER**
+            let finalTiming = aiPrediction;
+            if (sessionData.isLikelyHuman >= 0.7) { // 70% human confidence
+                finalTiming = applyHumanProtectionTiming(aiPrediction, mode, sessionData);
+                appLog(`👤 Human detected: ${rivalName} - Applied protection timing: ${finalTiming}ms`);
             }
+            
+            // Apply timing constraints
+            const constrainedTiming = applyTimingConstraints(finalTiming, mode);
+            
+            appLog(`🎯 AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms [original: ${aiPrediction}ms]`);
+            return constrainedTiming;
+            
+        } catch (error) {
+            appLog(`❌ AI Prediction failed: ${error.message}, falling back to manual timing`);
+            // Fall through to original logic
         }
-        
-        // Original AI predictor fallback
-        if (aiPredictorEnabled && rivalId && rivalName && loginTime) {
-            try {
-                const sessionData = {
-                    activityLevel: getRivalActivityLevel(rivalId) || 0.7,
-                    movementFreq: getRivalMovementFreq(rivalId) || 0.5,
-                    interactionRate: getRivalInteractionRate(rivalId) || 0.6,
-                    networkLatency: connection.lastPingTime || 50,
-                    systemLoad: getSystemLoad(),
-                    currentTime: Date.now(),
-                    sessionDuration: Date.now() - loginTime,
-                    isLikelyHuman: assessHumanLikelihood(rivalId, rivalName, loginTime)
-                };
-                
-                const aiPrediction = await aiPredictor.predictOptimalTiming(
-                    rivalId, rivalName, loginTime, mode, sessionData
-                );
-                
-                // Apply timing constraints
-                const constrainedTiming = applyTimingConstraints(aiPrediction, mode);
-                appLog(`🎯 Original AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms`);
-                return constrainedTiming;
-                
-            } catch (error) {
-                appLog(`❌ Original AI Prediction failed: ${error.message}, falling back to manual timing`);
-            }
-        }
-        
-        // Manual timing logic with enhanced protection
-        const isAttack = mode === 'attack';
-        const rcKey = connection.rcKey;
-        const globalStateForRC = globalTimingState[rcKey];
-        
-        let timing;
-        if (isAttack) {
-            timing = globalStateForRC.attack.currentTime !== null ? 
-                globalStateForRC.attack.currentTime : 
-                parseInt(config[`${rcKey}_startAttackTime`] || config[`${rcKey}_startAttackTime1`]) || 1700;
-        } else {
-            timing = globalStateForRC.defense.currentTime !== null ? 
-                globalStateForRC.defense.currentTime : 
-                parseInt(config[`${rcKey}_startDefenceTime`] || config[`${rcKey}_startDefenceTime1`]) || 1700;
-        }
-        
-        // Enhanced human protection for manual timing
-        if (rivalName && rivalId) {
-            const humanLikelihood = assessHumanLikelihood(rivalId, rivalName, loginTime);
-            if (humanLikelihood >= 0.7) {
-                if (isAttack) {
-                    timing = Math.max(timing + 100, 1600);
-                } else {
-                    timing = Math.max(timing + 150, 1650);
-                }
-                appLog(`👤 Manual Human Protection: ${rivalName} - Extended timing to ${timing}ms`);
-            }
-        }
-        
-        const constrainedTiming = applyTimingConstraints(timing, mode);
-        appLog(`🕰️ Manual Timing: mode=${mode}, rcKey=${rcKey}, timing=${constrainedTiming}ms, rival=${rivalName}`);
-        return constrainedTiming;
-        
-    } catch (error) {
-        appLog(`❌ getCurrentTiming critical error: ${error.message}`);
-        // Safe fallback timing
-        const isAttack = mode === 'attack';
-        const safeTiming = isAttack ? 1600 : 1700;
-        appLog(`🛡️ Using safe fallback timing: ${safeTiming}ms`);
-        return safeTiming;
     }
+    
+    // ORIGINAL TIMING LOGIC with human protection enhancement
+    const isAttack = mode === 'attack';
+    const rcKey = connection.rcKey;
+    const globalStateForRC = globalTimingState[rcKey];
+    
+    let timing;
+    if (isAttack) {
+        timing = globalStateForRC.attack.currentTime !== null ? 
+            globalStateForRC.attack.currentTime : 
+            parseInt(config[`${rcKey}_startAttackTime`] || config[`${rcKey}_startAttackTime1`]) || 1700;
+    } else {
+        timing = globalStateForRC.defense.currentTime !== null ? 
+            globalStateForRC.defense.currentTime : 
+            parseInt(config[`${rcKey}_startDefenceTime`] || config[`${rcKey}_startDefenceTime1`]) || 1700;
+    }
+    
+    // **ENHANCED HUMAN PROTECTION FOR MANUAL TIMING**
+    if (rivalName && rivalId) {
+        const humanLikelihood = assessHumanLikelihood(rivalId, rivalName, loginTime);
+        if (humanLikelihood >= 0.7) { // 70% human confidence
+            // Apply conservative timing for humans
+            if (isAttack) {
+                timing = Math.max(timing + 100, 1600); // Add 100ms safety buffer, minimum 1600ms
+            } else {
+                timing = Math.max(timing + 150, 1650); // Add 150ms safety buffer, minimum 1650ms
+            }
+            appLog(`👤 Manual Human Protection: ${rivalName} - Extended timing to ${timing}ms`);
+        }
+    }
+    
+    // Apply constraints to manual timing too
+    const constrainedTiming = applyTimingConstraints(timing, mode);
+    appLog(`🕰️ Manual Timing: mode=${mode}, rcKey=${rcKey}, timing=${constrainedTiming}ms, rival=${rivalName}`);
+    return constrainedTiming;
 }
 
 async function optimizedConnectionPoolMaintenance() {

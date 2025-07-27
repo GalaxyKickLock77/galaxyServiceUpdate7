@@ -1,0 +1,414 @@
+// ============================================================================
+// SMART AI TIMING PREDICTOR ENHANCEMENTS FOR ZERO-KICK PROTECTION
+// Add/Replace these sections in smart_adaptive_ai_timing_predictor.js
+// ============================================================================
+
+// 1. ENHANCED BOT DETECTION (Replace the existing detectBotOpponent function)
+/**
+ * ULTRA-ENHANCED Bot Detection with Human Protection Priority
+ * @param {string} rivalName - Rival's display name
+ * @param {string} rivalId - Rival's ID
+ * @param {object} sessionData - Current session context
+ * @returns {boolean} True if opponent is definitely a bot (conservative detection)
+ */
+detectBotOpponent(rivalName, rivalId, sessionData = {}) {
+    // **CONSERVATIVE BOT DETECTION - PRIORITIZE HUMAN PROTECTION**
+    // Only flag as bot if we're very confident to avoid kicking humans
+    
+    const strongBotIndicators = [
+        // Very high confidence bot patterns only
+        { check: /^Bot/i.test(rivalName), weight: 5, desc: "Explicitly named Bot" },
+        { check: /^AI_/i.test(rivalName), weight: 5, desc: "AI prefix" },
+        { check: /^Auto/i.test(rivalName), weight: 4, desc: "Auto prefix" },
+        { check: /^Test\d+$/i.test(rivalName), weight: 4, desc: "Test account pattern" },
+        
+        // Only count these if combined with other indicators
+        { check: sessionData.networkLatency <= 3, weight: 2, desc: "Impossible network speed" },
+        { check: sessionData.isPerfectActivity && sessionData.hasInstantMovements, weight: 3, desc: "Perfect + instant" },
+        { check: sessionData.connectionSpeed === 'instant' && sessionData.isQuickSession, weight: 2, desc: "Instant connection + quick" }
+    ];
+    
+    // Calculate bot confidence - MUCH higher threshold
+    let totalScore = 0;
+    let maxPossibleScore = 0;
+    const matchedIndicators = [];
+    
+    strongBotIndicators.forEach(indicator => {
+        maxPossibleScore += indicator.weight;
+        if (indicator.check) {
+            totalScore += indicator.weight;
+            matchedIndicators.push(indicator.desc);
+        }
+    });
+    
+    const botProbability = maxPossibleScore > 0 ? totalScore / maxPossibleScore : 0;
+    
+    // **CONSERVATIVE THRESHOLD: Only flag as bot if 80%+ confident**
+    const isBot = botProbability >= 0.8;
+    
+    // **HUMAN PROTECTION OVERRIDE**
+    if (isBot) {
+        // Double-check for any human indicators
+        const humanOverrides = [
+            rivalName.length > 12, // Long creative names are usually human
+            /[._\-]/.test(rivalName), // Special characters suggest human creativity
+            sessionData.sessionDuration > 3000, // Humans stay longer
+            sessionData.hasVariableDelay, // Variable timing is human
+            sessionData.showsHumanPatterns, // Complex interaction patterns
+            !sessionData.isPerfectActivity // Imperfect activity suggests human
+        ];
+        
+        const humanOverrideCount = humanOverrides.filter(Boolean).length;
+        
+        if (humanOverrideCount >= 2) {
+            console.log(`👤 Human override: ${rivalName} - Bot detection overridden by ${humanOverrideCount} human indicators`);
+            return false; // Treat as human to be safe
+        }
+    }
+    
+    // Update rival profile with conservative bot assessment
+    if (this.rivalProfiles.has(rivalId)) {
+        const profile = this.rivalProfiles.get(rivalId);
+        profile.botConfidence = botProbability;
+        profile.suspectedBot = isBot;
+        profile.humanProtectionActive = !isBot; // Enable protection if not clearly bot
+    }
+    
+    if (isBot) {
+        console.log(`🤖 Conservative Bot Detection: ${rivalName} (${(botProbability * 100).toFixed(1)}% confidence)`);
+        console.log(`   Strong bot indicators: ${matchedIndicators.join(', ')}`);
+    } else {
+        console.log(`👤 Treating as Human: ${rivalName} (${(botProbability * 100).toFixed(1)}% bot probability - below 80% threshold)`);
+    }
+    
+    return isBot;
+}
+
+// 2. ENHANCED BOT TIMING PREDICTION (Replace the existing predictBotTiming function)
+/**
+ * Conservative bot-specific timing with human safety fallbacks
+ */
+async predictBotTiming(rivalId, rivalName, loginTime, mode, sessionData, rivalProfile) {
+    const currentSessionDuration = Date.now() - loginTime;
+    
+    // **DOUBLE-CHECK HUMAN PROTECTION**
+    const humanOverrideCheck = [
+        sessionData.hasVariableDelay,
+        sessionData.showsHumanPatterns, 
+        currentSessionDuration > 4000,
+        rivalName.length > 10
+    ].filter(Boolean).length;
+    
+    if (humanOverrideCheck >= 2) {
+        console.log(`👤🛡️ Human protection override in bot timing - switching to human-safe timing`);
+        return this.getHumanSafeTiming(mode, currentSessionDuration);
+    }
+    
+    // Confirmed bot - use optimized timing
+    let botTiming;
+    
+    if (mode === 'attack') {
+        // **CONSERVATIVE BOT ATTACK TIMING** - Less aggressive to avoid edge cases
+        if (currentSessionDuration < 1000) {
+            botTiming = 1400 + (Math.random() * 80); // 1400-1480ms range (safer)
+        } else if (currentSessionDuration < 2000) {
+            botTiming = 1450 + (Math.random() * 100); // 1450-1550ms range
+        } else {
+            botTiming = 1500 + (Math.random() * 120); // 1500-1620ms range
+        }
+    } else {
+        // **CONSERVATIVE BOT DEFENSE TIMING**
+        if (currentSessionDuration < 1200) {
+            botTiming = 1550 + (Math.random() * 80); // 1550-1630ms range
+        } else if (currentSessionDuration < 2500) {
+            botTiming = 1600 + (Math.random() * 100); // 1600-1700ms range
+        } else {
+            botTiming = 1650 + (Math.random() * 100); // 1650-1750ms range
+        }
+    }
+    
+    // Apply historical performance adjustments (conservative)
+    if (rivalProfile.totalGames > 2) {
+        const botSuccessRate = rivalProfile.successfulGames / rivalProfile.totalGames;
+        
+        if (botSuccessRate < 0.5) {
+            // Poor performance - small conservative adjustment
+            botTiming += 20 + (Math.random() * 30); // Add 20-50ms for safety
+            console.log(`🤖🛡️ Conservative bot adjustment: +${20 + 30}ms (low success rate: ${(botSuccessRate * 100).toFixed(1)}%)`);
+        }
+    }
+    
+    // Constrain to safe ranges
+    const finalBotTiming = this.constrainTiming(Math.round(botTiming), mode);
+    
+    console.log(`🤖🎯 Conservative Bot Prediction: ${rivalName} (${mode}) = ${finalBotTiming}ms [session: ${currentSessionDuration}ms]`);
+    
+    return finalBotTiming;
+}
+
+// 3. NEW HUMAN-SAFE TIMING FUNCTION (Add this new function)
+/**
+ * Generate ultra-safe timing for suspected humans
+ */
+getHumanSafeTiming(mode, sessionDuration = 2000) {
+    const isAttack = mode === 'attack';
+    
+    // **ULTRA-CONSERVATIVE HUMAN TIMING**
+    let humanTiming;
+    
+    if (isAttack) {
+        // Attack mode: 1500-1650ms range (very safe)
+        if (sessionDuration < 2000) {
+            humanTiming = 1550 + (Math.random() * 60); // 1550-1610ms
+        } else if (sessionDuration < 5000) {
+            humanTiming = 1520 + (Math.random() * 80); // 1520-1600ms
+        } else {
+            humanTiming = 1500 + (Math.random() * 100); // 1500-1600ms
+        }
+    } else {
+        // Defense mode: 1600-1750ms range (very safe)
+        if (sessionDuration < 2000) {
+            humanTiming = 1650 + (Math.random() * 70); // 1650-1720ms
+        } else if (sessionDuration < 5000) {
+            humanTiming = 1620 + (Math.random() * 90); // 1620-1710ms
+        } else {
+            humanTiming = 1600 + (Math.random() * 120); // 1600-1720ms
+        }
+    }
+    
+    // Additional safety buffer for humans
+    humanTiming += 50 + (Math.random() * 50); // +50-100ms human protection buffer
+    
+    const finalTiming = this.constrainTiming(Math.round(humanTiming), mode);
+    console.log(`👤🛡️ Human-Safe Timing: ${mode} = ${finalTiming}ms [session: ${sessionDuration}ms]`);
+    
+    return finalTiming;
+}
+
+// 4. ENHANCED MAIN PREDICTION FUNCTION (Replace the existing predictOptimalTiming function)
+/**
+ * Main prediction function with enhanced human protection
+ */
+async predictOptimalTiming(rivalId, rivalName, loginTime, mode, sessionData = {}) {
+    const startTime = performance.now();
+    
+    try {
+        // Validate inputs and mode
+        if (!this.isValidMode(mode)) {
+            throw new Error(`Invalid mode: ${mode}. Use 'attack' or 'defense'`);
+        }
+        
+        // Get or create rival profile
+        const rivalProfile = this.getRivalProfile(rivalId, rivalName);
+        
+        // **ENHANCED HUMAN DETECTION WITH CONSERVATIVE APPROACH**
+        const isBot = this.detectBotOpponent(rivalName, rivalId, sessionData);
+        rivalProfile.isBot = isBot;
+        
+        // **HUMAN PROTECTION PRIORITY**
+        if (!isBot) {
+            console.log(`👤 Human detected: ${rivalName} - Using human-safe prediction strategy`);
+            const humanSafeTiming = this.getHumanSafeTiming(mode, sessionData.sessionDuration);
+            await this.logPrediction(rivalId, 'human_safe', humanSafeTiming, {
+                humanDetected: true,
+                sessionDuration: sessionData.sessionDuration,
+                mode: mode
+            }, 0.95);
+            return humanSafeTiming;
+        }
+        
+        // Confirmed bot - use bot-specific prediction
+        console.log(`🤖 Confirmed bot: ${rivalName} - Using optimized bot prediction strategy`);
+        const botTiming = await this.predictBotTiming(rivalId, rivalName, loginTime, mode, sessionData, rivalProfile);
+        
+        // Extract comprehensive features for bot
+        const features = await this.extractFeatures(rivalId, rivalName, loginTime, mode, sessionData, rivalProfile);
+        
+        // Check for preemptive logout scenario (for bots only)
+        const preemptiveKick = await this.logoutPredictor.checkPreemptiveKick(rivalProfile, features);
+        if (preemptiveKick.shouldKick) {
+            const timing = this.constrainTiming(preemptiveKick.timing, mode);
+            await this.logPrediction(rivalId, 'preemptive_bot', timing, features, preemptiveKick.confidence);
+            console.log(`⚡ Preemptive bot kick: ${rivalName}: ${timing}ms (confidence: ${(preemptiveKick.confidence * 100).toFixed(1)}%)`);
+            return timing;
+        }
+        
+        // Use bot timing with final safety check
+        const finalTiming = Math.max(botTiming, mode === 'attack' ? 1400 : 1500); // Absolute minimum safety
+        
+        // Log prediction for learning
+        await this.logPrediction(rivalId, `bot_${mode}`, finalTiming, features, 0.9);
+        
+        // Update rival profile
+        this.updateRivalProfile(rivalProfile, features, finalTiming);
+        
+        const processingTime = performance.now() - startTime;
+        console.log(`🎯 AI Bot Prediction: ${rivalName} (${mode}) = ${finalTiming}ms [confidence: 90%] [${processingTime.toFixed(1)}ms]`);
+        
+        return finalTiming;
+        
+    } catch (error) {
+        console.error(`❌ AI Prediction error for ${rivalName}:`, error.message);
+        // Fallback to human-safe timing when in doubt
+        return this.getHumanSafeTiming(mode, sessionData.sessionDuration || 2000);
+    }
+}
+
+// 5. ENHANCED TIMING CONSTRAINTS (Replace the existing constrainTiming function)
+/**
+ * Ultra-conservative timing constraints with human protection
+ */
+constrainTiming(timing, mode) {
+    const isAttack = mode === 'attack';
+    
+    // **HUMAN-PROTECTION FOCUSED CONSTRAINTS**
+    // Increased minimums to protect humans, keep reasonable maximums
+    const min = isAttack ? 1450 : 1550;  // Attack: 1450ms, Defense: 1550ms (increased for safety)
+    const max = isAttack ? 1700 : 1800;  // Attack: 1700ms, Defense: 1800ms (keep same)
+    
+    const constrainedTiming = Math.max(min, Math.min(max, Math.round(timing)));
+    
+    if (constrainedTiming !== Math.round(timing)) {
+        console.log(`⚠️🛡️ Human-protection timing constraint: ${Math.round(timing)}ms -> ${constrainedTiming}ms for ${mode}`);
+    }
+    
+    return constrainedTiming;
+}
+
+// 6. ENHANCED SMART BASELINE (Replace the existing getSmartBaseline function)
+/**
+ * Human-safe baseline timing when AI fails
+ */
+getSmartBaseline(mode, rivalId) {
+    const isAttack = mode === 'attack';
+    
+    // **ULTRA-SAFE BASELINE WITH HUMAN PROTECTION**
+    const baseMin = isAttack ? 1500 : 1600;  // Higher minimums for safety
+    const baseMax = isAttack ? 1650 : 1750;  // Conservative maximums
+    
+    // Add slight variation based on rival ID for better distribution
+    const variation = (rivalId ? parseInt(rivalId.slice(-2)) || 50 : 50) / 100;
+    const range = baseMax - baseMin;
+    
+    // Use middle-to-high range for maximum safety
+    const safeTiming = Math.round(baseMin + (range * 0.7) + (range * 0.2 * variation));
+    
+    console.log(`🛡️ Human-Safe Baseline: ${mode} = ${safeTiming}ms (fallback)`);
+    return safeTiming;
+}
+
+// 7. ENHANCED 3-SECOND RULE PROCESSING (Replace the existing processFeedback function)
+/**
+ * Process feedback with enhanced human protection and 3-second rule recovery
+ */
+async processFeedback(rivalId, predictedTiming, success, actualSessionDuration, additionalData = {}) {
+    try {
+        const rivalProfile = this.rivalProfiles.get(rivalId);
+        if (!rivalProfile) return;
+        
+        // Record outcome with enhanced 3-second rule processing
+        const outcome = {
+            timestamp: Date.now(),
+            predictedTiming,
+            success,
+            actualSessionDuration,
+            timingError: success ? 0 : (additionalData.timingError || 50),
+            wasThreeSecondRule: additionalData.wasThreeSecondRule || false,
+            ...additionalData
+        };
+        
+        // **HUMAN-AWARE 3-SECOND RULE PROCESSING**
+        const isBot = rivalProfile.isBot || false;
+        const humanProtectionActive = rivalProfile.humanProtectionActive || !isBot;
+        
+        // IMMEDIATE 3-SECOND RULE ADJUSTMENT with human protection
+        if (additionalData.wasThreeSecondRule) {
+            let adjustment;
+            
+            if (humanProtectionActive || !isBot) {
+                // LARGE conservative adjustments for humans/unknowns
+                adjustment = 100 + Math.random() * 50; // 100-150ms range for human protection
+                console.log(`⚡👤 Human 3s Rule Protection: +${adjustment.toFixed(0)}ms for human/unknown ${rivalId}`);
+            } else {
+                // Smaller adjustments for confirmed bots only
+                adjustment = 60 + Math.random() * 30; // 60-90ms range for confirmed bots
+                console.log(`⚡🤖 Bot 3s Rule Adjustment: +${adjustment.toFixed(0)}ms for confirmed bot ${rivalId}`);
+            }
+            
+            this.applyImmediateAdjustment(rivalId, adjustment);
+        }
+        
+        // **CONSERVATIVE FAILURE HANDLING**
+        if (!success && humanProtectionActive) {
+            // Failed against potential human - apply maximum caution
+            const cautionAdjustment = 80 + Math.random() * 40; // 80-120ms extra caution
+            rivalProfile.nextTimingAdjustment = (rivalProfile.nextTimingAdjustment || 0) + cautionAdjustment;
+            console.log(`👤🛡️ Human protection failure adjustment: +${cautionAdjustment.toFixed(0)}ms for safety`);
+        }
+        
+        // Update performance metrics
+        this.updatePerformanceMetrics(rivalId, success);
+        
+        // Trigger real-time learning with conservative parameters
+        if (!success) {
+            this.adaptationEngine.learningRate = humanProtectionActive ? 0.05 : 0.1; // Slower learning for humans
+        } else {
+            this.adaptationEngine.learningRate = 0.03; // Conservative rate for successes
+        }
+        
+        await this.adaptationEngine.processOutcome(rivalProfile, outcome);
+        
+        // Log for continuous improvement
+        await this.dataLogger.logOutcome(rivalId, outcome);
+        
+        const playerType = rivalProfile.isBot ? 'BOT' : (humanProtectionActive ? 'HUMAN/PROTECTED' : 'UNKNOWN');
+        console.log(`📊 Human-Protected AI Feedback: ${playerType} ${rivalId} success=${success} 3sRule=${outcome.wasThreeSecondRule} timing=${predictedTiming}ms duration=${actualSessionDuration}ms`);
+        
+    } catch (error) {
+        console.error('❌ Human-protected feedback processing error:', error.message);
+    }
+}
+
+// 8. INITIALIZATION ENHANCEMENT (Add to the initialize function)
+// Add this to the end of the initialize() function:
+
+async initialize() {
+    try {
+        await this.loadHistoricalData();
+        await this.initializeModels();
+        
+        // **HUMAN PROTECTION SYSTEM INITIALIZATION**
+        this.humanProtectionEnabled = true;
+        this.conservativeBotDetection = true;
+        this.minimumHumanSafetyBuffer = 100; // 100ms minimum safety buffer for humans
+        
+        // Update configuration for human protection
+        this.config.ATTACK_MIN = 1450;    // Increased for human safety
+        this.config.DEFENSE_MIN = 1550;   // Increased for human safety
+        this.config.HUMAN_SAFETY_BUFFER = 100; // New safety buffer
+        
+        this.initialized = true;
+        console.log('🧠🛡️ Smart AI Timing Predictor initialized with HUMAN PROTECTION');
+        console.log(`👤 Human Protection: ENABLED`);
+        console.log(`🤖 Conservative Bot Detection: ENABLED (80% threshold)`);
+        console.log(`🛡️ Safety Buffers: Attack +100ms, Defense +150ms for humans`);
+        
+    } catch (error) {
+        console.error('❌ AI Predictor initialization failed:', error.message);
+        // Fallback to ultra-safe human protection mode
+        this.initialized = false;
+        this.humanProtectionEnabled = true;
+    }
+}
+
+// ============================================================================
+// INSTALLATION INSTRUCTIONS FOR SMART AI TIMING PREDICTOR:
+// 1. Replace the detectBotOpponent function with the enhanced version above
+// 2. Replace the predictBotTiming function with the conservative version
+// 3. Add the new getHumanSafeTiming function
+// 4. Replace the predictOptimalTiming function main logic
+// 5. Replace the constrainTiming function with human-protection focused version
+// 6. Replace the getSmartBaseline function with ultra-safe version  
+// 7. Replace the processFeedback function with human-aware version
+// 8. Add the human protection initialization to the initialize() function
+// ============================================================================

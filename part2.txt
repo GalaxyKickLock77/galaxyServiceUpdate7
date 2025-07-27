@@ -1,0 +1,527 @@
+// ============================================================================
+// ZERO-KICK PROTECTION SYSTEM - TARGETED ENHANCEMENTS
+// Add these sections to galaxy_1.js to eliminate human kicks
+// ============================================================================
+
+// 1. ENHANCED BOT VS HUMAN DETECTION (Insert after line where detectBotOpponent is called)
+// Replace the existing bot detection in getCurrentTiming function with this enhanced version:
+
+async function getCurrentTiming(mode, connection, rivalId = null, rivalName = null, loginTime = null) {
+    // If AI predictor is enabled and we have rival data, use AI prediction
+    if (aiPredictorEnabled && rivalId && rivalName && loginTime) {
+        try {
+            // **ENHANCED SESSION DATA WITH HUMAN DETECTION**
+            const sessionData = {
+                activityLevel: getRivalActivityLevel(rivalId) || 0.7,
+                movementFreq: getRivalMovementFreq(rivalId) || 0.5,
+                interactionRate: getRivalInteractionRate(rivalId) || 0.6,
+                networkLatency: connection.lastPingTime || 50,
+                systemLoad: getSystemLoad(),
+                currentTime: Date.now(),
+                
+                // **CRITICAL HUMAN DETECTION ENHANCEMENTS**
+                sessionDuration: Date.now() - loginTime,
+                connectionSpeed: connection.lastPingTime <= 10 ? 'instant' : 'normal',
+                rivalActivityProfile: rivalActivityProfiles.get(rivalId),
+                isQuickSession: (Date.now() - loginTime) < 1000,
+                isPerfectActivity: getRivalActivityLevel(rivalId) === 1.0,
+                hasInstantMovements: getRivalMovementFreq(rivalId) >= 0.95,
+                
+                // **NEW: HUMAN BEHAVIOR INDICATORS**
+                hasVariableDelay: checkVariableHumanDelay(rivalId),
+                showsHumanPatterns: detectHumanInteractionPatterns(rivalId),
+                hasNaturalActivity: checkNaturalActivityPattern(rivalId),
+                isLikelyHuman: assessHumanLikelihood(rivalId, rivalName, loginTime)
+            };
+            
+            const aiPrediction = await aiPredictor.predictOptimalTiming(
+                rivalId, 
+                rivalName, 
+                loginTime, 
+                mode, 
+                sessionData
+            );
+            
+            // **HUMAN PROTECTION LAYER**
+            let finalTiming = aiPrediction;
+            if (sessionData.isLikelyHuman) {
+                finalTiming = applyHumanProtectionTiming(aiPrediction, mode, sessionData);
+                appLog(`👤 Human detected: ${rivalName} - Applied protection timing: ${finalTiming}ms`);
+            }
+            
+            // Apply timing constraints
+            const constrainedTiming = applyTimingConstraints(finalTiming, mode);
+            
+            appLog(`🎯 AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms [original: ${aiPrediction}ms]`);
+            return constrainedTiming;
+            
+        } catch (error) {
+            appLog(`❌ AI Prediction failed: ${error.message}, falling back to manual timing`);
+            // Fall through to original logic
+        }
+    }
+    
+    // ORIGINAL TIMING LOGIC with human protection enhancement
+    const isAttack = mode === 'attack';
+    const rcKey = connection.rcKey;
+    const globalStateForRC = globalTimingState[rcKey];
+    
+    let timing;
+    if (isAttack) {
+        timing = globalStateForRC.attack.currentTime !== null ? 
+            globalStateForRC.attack.currentTime : 
+            parseInt(config[`${rcKey}_startAttackTime`] || config[`${rcKey}_startAttackTime1`]) || 1700;
+    } else {
+        timing = globalStateForRC.defense.currentTime !== null ? 
+            globalStateForRC.defense.currentTime : 
+            parseInt(config[`${rcKey}_startDefenceTime`] || config[`${rcKey}_startDefenceTime1`]) || 1700;
+    }
+    
+    // **ENHANCED HUMAN PROTECTION FOR MANUAL TIMING**
+    if (rivalName && rivalId) {
+        const humanLikelihood = assessHumanLikelihood(rivalId, rivalName, loginTime);
+        if (humanLikelihood >= 0.7) { // 70% human confidence
+            // Apply conservative timing for humans
+            if (isAttack) {
+                timing = Math.max(timing + 100, 1600); // Add 100ms safety buffer, minimum 1600ms
+            } else {
+                timing = Math.max(timing + 150, 1650); // Add 150ms safety buffer, minimum 1650ms
+            }
+            appLog(`👤 Manual Human Protection: ${rivalName} - Extended timing to ${timing}ms`);
+        }
+    }
+    
+    // Apply constraints to manual timing too
+    const constrainedTiming = applyTimingConstraints(timing, mode);
+    appLog(`🕰️ Manual Timing: mode=${mode}, rcKey=${rcKey}, timing=${constrainedTiming}ms, rival=${rivalName}`);
+    return constrainedTiming;
+}
+
+// 2. HUMAN DETECTION HELPER FUNCTIONS (Add these new functions)
+
+// Check for variable human-like delays in actions
+function checkVariableHumanDelay(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 3) return false;
+    
+    const recentActivities = profile.activities.slice(-10); // Last 10 activities
+    const intervals = [];
+    
+    for (let i = 1; i < recentActivities.length; i++) {
+        intervals.push(recentActivities[i].timestamp - recentActivities[i-1].timestamp);
+    }
+    
+    if (intervals.length < 2) return false;
+    
+    // Calculate variance - humans have more variable timing
+    const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((acc, val) => acc + Math.pow(val - avg, 2), 0) / intervals.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // Humans typically have stdDev > 100ms, bots have very low variance
+    return stdDev > 100;
+}
+
+// Detect human interaction patterns
+function detectHumanInteractionPatterns(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile) return false;
+    
+    const humanIndicators = [
+        // Variable activity levels (not constant)
+        profile.activities && profile.activities.length > 5 && 
+        profile.activities.some(a => a.level !== profile.activities[0].level),
+        
+        // Natural movement patterns
+        profile.movements && profile.movements.length > 3 &&
+        !profile.movements.every(m => m.instant === true),
+        
+        // Interaction delays showing thought process
+        profile.interactions && profile.interactions.length > 2 &&
+        profile.interactions.some(i => i.responseTime > 200), // >200ms response time
+    ];
+    
+    return humanIndicators.filter(Boolean).length >= 2; // At least 2 human indicators
+}
+
+// Check for natural activity patterns
+function checkNaturalActivityPattern(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 5) return false;
+    
+    const now = Date.now();
+    const recentActivities = profile.activities.filter(a => now - a.timestamp < 30000); // Last 30 seconds
+    
+    // Natural patterns: not perfectly consistent, some pauses, variable intensity
+    const hasNaturalPauses = recentActivities.some((activity, i) => {
+        if (i === 0) return false;
+        const gap = activity.timestamp - recentActivities[i-1].timestamp;
+        return gap > 1000 && gap < 5000; // 1-5 second natural pauses
+    });
+    
+    const hasVariableIntensity = recentActivities.length > 0 && 
+        !recentActivities.every(a => a.intensity === recentActivities[0].intensity);
+    
+    return hasNaturalPauses || hasVariableIntensity;
+}
+
+// Comprehensive human likelihood assessment
+function assessHumanLikelihood(rivalId, rivalName, loginTime) {
+    const sessionDuration = Date.now() - (loginTime || Date.now());
+    
+    // WEIGHTED HUMAN INDICATORS
+    const humanFactors = [
+        // Name patterns (humans have more creative names)
+        { weight: 2, check: !/^[a-zA-Z]+\d{1,3}$/.test(rivalName), desc: "Non-pattern name" },
+        { weight: 3, check: !/^(Bot|AI_|Auto|Test|Player\d+|User\d+)/i.test(rivalName), desc: "Non-bot name" },
+        { weight: 2, check: rivalName.length > 8, desc: "Longer creative name" },
+        
+        // Behavioral patterns
+        { weight: 3, check: checkVariableHumanDelay(rivalId), desc: "Variable timing" },
+        { weight: 3, check: detectHumanInteractionPatterns(rivalId), desc: "Human interaction patterns" },
+        { weight: 2, check: checkNaturalActivityPattern(rivalId), desc: "Natural activity" },
+        
+        // Session characteristics
+        { weight: 1, check: sessionDuration > 2000, desc: "Longer session" },
+        { weight: 1, check: getRivalActivityLevel(rivalId) < 0.9, desc: "Imperfect activity" },
+        { weight: 2, check: getRivalMovementFreq(rivalId) < 0.8, desc: "Human-like movement" },
+        
+        // Historical data
+        { weight: 2, check: rivalActivityProfiles.has(rivalId) && 
+                              rivalActivityProfiles.get(rivalId).activities.length > 10, desc: "Rich activity history" }
+    ];
+    
+    let totalScore = 0;
+    let maxPossibleScore = 0;
+    const matchedFactors = [];
+    
+    humanFactors.forEach(factor => {
+        maxPossibleScore += factor.weight;
+        if (factor.check) {
+            totalScore += factor.weight;
+            matchedFactors.push(factor.desc);
+        }
+    });
+    
+    const humanProbability = maxPossibleScore > 0 ? totalScore / maxPossibleScore : 0.5;
+    
+    if (humanProbability >= 0.7) {
+        appLog(`👤 Human detected: ${rivalName} (${(humanProbability * 100).toFixed(1)}% confidence)`);
+        appLog(`   Human indicators: ${matchedFactors.join(', ')}`);
+    }
+    
+    return humanProbability;
+}
+
+// Human-specific protection timing
+function applyHumanProtectionTiming(baseTiming, mode, sessionData) {
+    const isAttack = mode === 'attack';
+    let protectedTiming = baseTiming;
+    
+    // Base human protection - add safety buffer
+    const baseBuffer = isAttack ? 120 : 180; // Attack: +120ms, Defense: +180ms
+    protectedTiming += baseBuffer;
+    
+    // Additional protections based on human confidence
+    if (sessionData.isLikelyHuman >= 0.9) {
+        // Very confident human - maximum protection
+        protectedTiming += isAttack ? 80 : 120; // Extra 80/120ms
+        appLog(`👤🛡️ Maximum human protection applied: +${baseBuffer + (isAttack ? 80 : 120)}ms total`);
+    } else if (sessionData.isLikelyHuman >= 0.8) {
+        // Confident human - high protection
+        protectedTiming += isAttack ? 50 : 80; // Extra 50/80ms
+        appLog(`👤🛡️ High human protection applied: +${baseBuffer + (isAttack ? 50 : 80)}ms total`);
+    } else if (sessionData.isLikelyHuman >= 0.7) {
+        // Likely human - moderate protection
+        protectedTiming += isAttack ? 30 : 50; // Extra 30/50ms
+        appLog(`👤🛡️ Moderate human protection applied: +${baseBuffer + (isAttack ? 30 : 50)}ms total`);
+    }
+    
+    // Session duration protection (longer sessions = more likely human)
+    if (sessionData.sessionDuration > 5000) { // 5+ seconds
+        protectedTiming += 40;
+        appLog(`👤⏱️ Long session protection: +40ms (session: ${sessionData.sessionDuration}ms)`);
+    }
+    
+    // Variable activity protection
+    if (sessionData.hasVariableDelay) {
+        protectedTiming += 30;
+        appLog(`👤🎯 Variable activity protection: +30ms`);
+    }
+    
+    return Math.round(protectedTiming);
+}
+
+// 3. ENHANCED RIVAL ACTIVITY TRACKING (Update existing trackRivalActivity function)
+// Replace the existing trackRivalActivity function with this enhanced version:
+
+function trackRivalActivity(rivalId, activityType, data = {}) {
+    if (!rivalActivityProfiles.has(rivalId)) {
+        rivalActivityProfiles.set(rivalId, {
+            activities: [],
+            movements: [],
+            interactions: [],
+            loginTime: Date.now(),
+            sessionDuration: 0,
+            
+            // **NEW: HUMAN DETECTION FIELDS**
+            lastActivityTime: Date.now(),
+            activityIntervals: [],
+            responseDelays: [],
+            movementVariability: [],
+            interactionComplexity: 0
+        });
+    }
+    
+    const profile = rivalActivityProfiles.get(rivalId);
+    const timestamp = Date.now();
+    
+    // **ENHANCED ACTIVITY TRACKING WITH HUMAN DETECTION**
+    switch (activityType) {
+        case 'activity':
+            // Track timing intervals for human detection
+            if (profile.lastActivityTime) {
+                const interval = timestamp - profile.lastActivityTime;
+                profile.activityIntervals.push(interval);
+                if (profile.activityIntervals.length > 20) {
+                    profile.activityIntervals = profile.activityIntervals.slice(-20);
+                }
+            }
+            
+            profile.activities.push({ 
+                timestamp, 
+                level: data.level || Math.random(), // Activity intensity
+                intensity: data.intensity || Math.random(),
+                ...data 
+            });
+            
+            // Keep only recent activities (last 50)
+            if (profile.activities.length > 50) {
+                profile.activities = profile.activities.slice(-50);
+            }
+            profile.lastActivityTime = timestamp;
+            break;
+            
+        case 'movement':
+            // Track movement timing and patterns
+            const movementDelay = data.delay || (timestamp - (data.lastMovement || timestamp));
+            profile.movementVariability.push(movementDelay);
+            if (profile.movementVariability.length > 15) {
+                profile.movementVariability = profile.movementVariability.slice(-15);
+            }
+            
+            profile.movements.push({ 
+                timestamp, 
+                instant: movementDelay < 50, // Movements under 50ms are likely bot
+                delay: movementDelay,
+                towardExit: data.towardExit || false,
+                ...data 
+            });
+            
+            if (profile.movements.length > 30) {
+                profile.movements = profile.movements.slice(-30);
+            }
+            break;
+            
+        case 'interaction':
+            // Track interaction complexity and response times
+            const responseTime = data.responseTime || 200;
+            profile.responseDelays.push(responseTime);
+            if (profile.responseDelays.length > 10) {
+                profile.responseDelays = profile.responseDelays.slice(-10);
+            }
+            
+            // Increase complexity score for varied interactions
+            if (responseTime > 150) profile.interactionComplexity += 1;
+            if (data.complex) profile.interactionComplexity += 2;
+            
+            profile.interactions.push({ 
+                timestamp, 
+                responseTime,
+                complex: data.complex || false,
+                ...data 
+            });
+            
+            if (profile.interactions.length > 20) {
+                profile.interactions = profile.interactions.slice(-20);
+            }
+            break;
+    }
+    
+    // Update session duration
+    profile.sessionDuration = timestamp - profile.loginTime;
+}
+
+// 4. ULTRA-SAFE TIMING CONSTRAINTS (Update applyTimingConstraints function)
+// Replace the existing applyTimingConstraints function:
+
+function applyTimingConstraints(timing, mode) {
+    const isAttack = mode === 'attack';
+    
+    // **ULTRA-CONSERVATIVE CONSTRAINTS FOR HUMAN PROTECTION**
+    const minTime = isAttack ? 1400 : 1500;  // Increased minimums: Attack: 1400ms, Defense: 1500ms
+    const maxTime = isAttack ? 1700 : 1800;  // Keep maximums: Attack: 1700ms, Defense: 1800ms
+    
+    if (timing < minTime) {
+        appLog(`⚠️🛡️ Timing ${timing}ms below ultra-safe ${mode} range, adjusting to ${minTime}ms for human protection`);
+        return minTime;
+    }
+    
+    if (timing > maxTime) {
+        appLog(`⚠️ Timing ${timing}ms above safe ${mode} range, adjusting to ${maxTime}ms`);
+        return maxTime;
+    }
+    
+    return Math.round(timing);
+}
+
+// 5. ENHANCED 3-SECOND RULE RECOVERY (Add this new function)
+// Add this function to better handle 3-second rule recovery:
+
+function processThreeSecondRuleRecovery(rivalId, predictedTiming, isThreeSecondRule, mode) {
+    if (!isThreeSecondRule) return; // No recovery needed
+    
+    const rivalProfile = rivalActivityProfiles.get(rivalId);
+    if (!rivalProfile) return;
+    
+    // **HUMAN-AWARE 3-SECOND RULE RECOVERY**
+    const humanProbability = assessHumanLikelihood(rivalId, rivalProfile.name || 'unknown', rivalProfile.loginTime);
+    
+    let adjustmentAmount;
+    if (humanProbability >= 0.7) {
+        // Conservative adjustment for humans
+        adjustmentAmount = 80 + (Math.random() * 40); // 80-120ms for humans
+        appLog(`👤⚡ Human 3s Rule Recovery: +${adjustmentAmount.toFixed(0)}ms for human rival`);
+    } else {
+        // More aggressive for suspected bots
+        adjustmentAmount = 40 + (Math.random() * 30); // 40-70ms for bots
+        appLog(`🤖⚡ Bot 3s Rule Recovery: +${adjustmentAmount.toFixed(0)}ms for bot rival`);
+    }
+    
+    // Apply the adjustment to AI predictor if available
+    if (aiPredictorEnabled && aiPredictor.applyImmediateAdjustment) {
+        aiPredictor.applyImmediateAdjustment(rivalId, adjustmentAmount);
+    }
+    
+    // Also adjust manual timing for this RC/mode combination
+    const rcKey = activeConnection ? activeConnection.rcKey : 'RC1';
+    const globalStateForRC = globalTimingState[rcKey];
+    
+    if (mode === 'attack') {
+        globalStateForRC.attack.currentTime = Math.min(
+            globalStateForRC.attack.currentTime + adjustmentAmount,
+            1700 // Don't exceed maximum
+        );
+    } else {
+        globalStateForRC.defense.currentTime = Math.min(
+            globalStateForRC.defense.currentTime + adjustmentAmount,
+            1800 // Don't exceed maximum
+        );
+    }
+    
+    appLog(`🔧 Applied 3s Rule Recovery: ${mode} timing adjusted by +${adjustmentAmount.toFixed(0)}ms`);
+}
+
+// 6. REPLACE THE EXISTING 850 CASE HANDLER
+// Find the "case '850':" section and replace it with this enhanced version:
+
+case "850":
+    const is3SecondRule = payload.includes("3 секунд(ы)") || payload.includes("Нельзя");
+    const kickSuccess = !is3SecondRule;
+    
+    // **ENHANCED 3-SECOND RULE PROCESSING WITH HUMAN PROTECTION**
+    if (lastKickedRival && lastKickedRival.predictedTiming) {
+        const actualSessionDuration = Date.now() - lastKickedRival.loginTime;
+        
+        // Immediate AI feedback processing (within 50ms as per AI pilot context)
+        processThreeSecondRuleFeedback(
+            lastKickedRival.id,
+            lastKickedRival.predictedTiming,
+            is3SecondRule
+        );
+        
+        // **NEW: ENHANCED 3-SECOND RULE RECOVERY**
+        if (is3SecondRule) {
+            processThreeSecondRuleRecovery(
+                lastKickedRival.id,
+                lastKickedRival.predictedTiming,
+                is3SecondRule,
+                lastKickedRival.mode || currentMode
+            );
+        }
+        
+        // Log outcome for ML training
+        mlDataLogger.logOutcome(
+            lastKickedRival.id,
+            lastKickedRival.predictedTiming,
+            kickSuccess,
+            actualSessionDuration,
+            {
+                wasThreeSecondRule: is3SecondRule,
+                mode: lastKickedRival.mode,
+                timingError: is3SecondRule ? 50 : 0,
+                humanLikelihood: assessHumanLikelihood(lastKickedRival.id, lastKickedRival.name, lastKickedRival.loginTime)
+            }
+        );
+        
+        appLog(`📊 Enhanced AI Feedback: Rival=${lastKickedRival.name}, Success=${kickSuccess}, 3sRule=${is3SecondRule}, Duration=${actualSessionDuration}ms, Human=${(assessHumanLikelihood(lastKickedRival.id, lastKickedRival.name, lastKickedRival.loginTime) * 100).toFixed(1)}%`);
+    }
+    
+    // Original timing adjustment logic (enhanced with human awareness)
+    if (is3SecondRule) {
+        appLog(`⚡ 3-second rule detected. Enhanced recovery with human protection.`);
+        if (currentMode === 'attack' || currentMode === 'defence') {
+            const newTiming = incrementTiming(currentMode, this, '3second');
+            appLog(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
+        }
+    } else {
+        appLog(`⚡⚡KICKED Rival in mode: ${currentMode} - ${payload}`);
+        if (currentMode === 'attack' || currentMode === 'defence') {
+            const newTiming = incrementTiming(currentMode, this, 'success');
+            appLog(`Adjusted ${currentMode} timing due to kick: ${newTiming}ms`);
+        }
+    }
+    
+    // Reset processing flags and cleanup
+    isProcessingRivalAction = false;
+    if (processingRivalTimeout) {
+        clearTimeout(processingRivalTimeout);
+        processingRivalTimeout = null;
+    }
+    
+    this.send("QUIT :ds");
+    await this.cleanup();
+    if (activeConnection === this) {
+        activeConnection = null;
+    }
+    break;
+
+// 7. INITIALIZATION LOG (Add at the end of the file, before module exports)
+// Add this initialization check:
+
+// Enhanced system initialization with human protection
+setTimeout(() => {
+    appLog(`🛡️ ZERO-KICK PROTECTION SYSTEM LOADED`);
+    appLog(`👤 Human Detection: ENABLED`);
+    appLog(`🎯 Ultra-Safe Timing: Attack(1400-1700ms), Defense(1500-1800ms)`);
+    appLog(`⚡ Enhanced 3s Rule Recovery: ACTIVE`);
+    appLog(`🔧 Variable Human Protection: ACTIVE`);
+    
+    // Test human detection on startup
+    const testHuman = assessHumanLikelihood('test123', 'TestHumanPlayer', Date.now() - 5000);
+    const testBot = assessHumanLikelihood('bot456', 'Bot123', Date.now() - 1000);
+    
+    appLog(`🧪 Detection Test: Human=${(testHuman * 100).toFixed(1)}%, Bot=${(testBot * 100).toFixed(1)}%`);
+    
+}, 6000); // 6 seconds after startup to ensure all systems are loaded
+
+// ============================================================================
+// INSTALLATION INSTRUCTIONS:
+// 1. Copy the getCurrentTiming function and replace the existing one in galaxy_1.js
+// 2. Add all the new helper functions (checkVariableHumanDelay, detectHumanInteractionPatterns, etc.)
+// 3. Replace the trackRivalActivity function with the enhanced version
+// 4. Replace the applyTimingConstraints function with the ultra-safe version
+// 5. Add the processThreeSecondRuleRecovery function
+// 6. Replace the case "850" handler with the enhanced version
+// 7. Add the initialization log at the end
+// ============================================================================
