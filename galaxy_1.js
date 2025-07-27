@@ -1,3 +1,4 @@
+// AI-specific error handling section will be placed after variable declarations
 const WebSocket = require('ws');
 const fs = require('fs').promises;
 const fsSync = require('fs');
@@ -7,11 +8,19 @@ const https = require('https');
 const { URL } = require('url');
 const { MISTRAL_API_KEY } = require('./src/secrets/mistral_api_key');
 const io = require('socket.io-client');
-const { AITimingPredictor } = require('./smart_adaptive_ai_timing_predictor');
+const SmartAdaptiveTimingPredictor = require('./smart_adaptive_ai_timing_predictor');
+const GalaxyServiceImprovement = require('./galaxy_integration_improvements');
+
+// Initialize Galaxy Service Improvement System
+let galaxyImprovement = null;
+let lastKickedRival = null;
+let lastPredictedTiming = null;
 
 const LOG_FILE_PATH = 'galaxy_1.log';
 const LOG_FILE_MAX_SIZE_BYTES = 1024 * 1024; // 1 MB
 const LOG_CLEANUP_INTERVAL_MS = 60 * 1000; // 60 seconds (synchronized)
+const aiPredictor = new SmartAdaptiveTimingPredictor();
+let aiPredictorEnabled = true; // Can be controlled via config
 
 const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
@@ -83,6 +92,157 @@ process.on('SIGUSR2', () => {
     updateConfigValues();
 });
 
+// Enhanced shutdown handler for proper cleanup
+let isShuttingDown = false;
+const shutdownTimeouts = new Set();
+const shutdownIntervals = new Set();
+
+// Track all intervals and timeouts for cleanup
+const originalSetTimeout = global.setTimeout;
+const originalSetInterval = global.setInterval;
+const originalClearTimeout = global.clearTimeout;
+const originalClearInterval = global.clearInterval;
+
+global.setTimeout = function(callback, delay, ...args) {
+    const timeoutId = originalSetTimeout.call(this, callback, delay, ...args);
+    if (!isShuttingDown) {
+        shutdownTimeouts.add(timeoutId);
+    }
+    return timeoutId;
+};
+
+global.setInterval = function(callback, delay, ...args) {
+    const intervalId = originalSetInterval.call(this, callback, delay, ...args);
+    if (!isShuttingDown) {
+        shutdownIntervals.add(intervalId);
+    }
+    return intervalId;
+};
+
+global.clearTimeout = function(timeoutId) {
+    shutdownTimeouts.delete(timeoutId);
+    return originalClearTimeout.call(this, timeoutId);
+};
+
+global.clearInterval = function(intervalId) {
+    shutdownIntervals.delete(intervalId);
+    return originalClearInterval.call(this, intervalId);
+};
+
+async function gracefulShutdown(signal) {
+    if (isShuttingDown) {
+        console.log('Force exit...');
+        process.exit(1);
+    }
+    
+    isShuttingDown = true;
+    console.log(`\n🛑 Received ${signal}. Starting graceful shutdown...`);
+    
+    try {
+        // Use enhanced shutdown if available
+        if (galaxyImprovement && typeof galaxyImprovement.enhancedShutdown === 'function') {
+            console.log('🚀 Using Galaxy Service Improvement enhanced shutdown...');
+            await galaxyImprovement.enhancedShutdown(signal);
+            return; // Enhanced shutdown handles everything
+        }
+        
+        // Fallback to original shutdown process
+        console.log('📋 Using fallback shutdown process...');
+        
+        // Clear all timeouts and intervals
+        shutdownTimeouts.forEach(id => originalClearTimeout(id));
+        shutdownIntervals.forEach(id => originalClearInterval(id));
+        shutdownTimeouts.clear();
+        shutdownIntervals.clear();
+        
+        console.log('✅ Cleared all timeouts and intervals');
+        
+        // Close WebSocket API connection
+        if (apiSocket && apiSocket.connected) {
+            apiSocket.disconnect();
+            console.log('✅ Disconnected from Flask API');
+        }
+        
+        // Close all active connections
+        if (activeConnection) {
+            await activeConnection.cleanup(true);
+            activeConnection = null;
+            console.log('✅ Closed active connection');
+        }
+        
+        // Close all pool connections
+        const closePromises = [];
+        connectionPool.forEach(conn => {
+            closePromises.push(conn.cleanup(true));
+        });
+        
+        // Close all prison connections
+        prisonConnectionPool.forEach(conn => {
+            closePromises.push(conn.cleanup(true));
+        });
+        
+        await Promise.allSettled(closePromises);
+        console.log(`✅ Closed ${closePromises.length} pool connections`);
+        
+        // Clear all data structures
+        connectionPool.length = 0;
+        prisonConnectionPool.length = 0;
+        trackedRivals.clear();
+        userMap.clear();
+        rivalActivityProfiles.clear();
+        rivalCache.clear();
+        founderIds.clear();
+        
+        console.log('✅ Cleared all data structures');
+        
+        // Flush any remaining logs
+        if (mlDataLogger) {
+            await mlDataLogger.flushLogs();
+            console.log('✅ Flushed ML data logs');
+        }
+        
+        await processLogQueue();
+        console.log('✅ Processed remaining log queue');
+        
+        console.log('🏁 Graceful shutdown completed successfully');
+        process.exit(0);
+        
+    } catch (error) {
+        console.error('❌ Error during shutdown:', error.message);
+        process.exit(1);
+    }
+}
+
+// Handle various shutdown signals
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGQUIT', () => gracefulShutdown('SIGQUIT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    gracefulShutdown('uncaughtException');
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    
+    // If AI predictor fails, disable it temporarily
+    if (reason && reason.message && reason.message.includes('AI')) {
+        appLog(`⚠️ Temporarily disabling AI predictor due to error`);
+        aiPredictorEnabled = false;
+        
+        // Re-enable after 30 seconds
+        setTimeout(() => {
+            aiPredictorEnabled = config.aiPredictorEnabled === "true" || config.aiPredictorEnabled === true;
+            appLog(`🔄 AI predictor re-enabled: ${aiPredictorEnabled}`);
+        }, 30000);
+    }
+    
+    // Don't exit on unhandled rejection, just log it
+});
+
 // Optimized Connection Pool to Avoid Rate Limits
 const POOL_MIN_SIZE = 1;
 const POOL_MAX_SIZE = 3;
@@ -123,73 +283,6 @@ let whiteListMember = [];
 let userMap = new Map(); // Use Map for better performance
 let currentMode = null;
 let currentConnectionPromise = null;
-
-// Enhanced AI Timing Predictor
-let aiTimingPredictor = new AITimingPredictor();
-aiTimingPredictor.setEnabled(true); // Enable by default
-
-// Clean old AI data periodically
-setInterval(() => {
-    if (aiTimingPredictor && aiTimingPredictor.cleanOldData) {
-        aiTimingPredictor.cleanOldData();
-    }
-}, 3600000); // Every hour
-
-// Log AI stats periodically
-setInterval(() => {
-    if (config.aiPilotToggle && aiTimingPredictor) {
-        const stats = getAIPerformanceStats();
-        if (stats.totalPredictions > 0) {
-            appLog(`📊 AI Stats: ${stats.successfulKicks}/${stats.totalPredictions} (${stats.accuracy.toFixed(1)}% accuracy), 3s errors: ${stats.threeSecondErrors}, rivals: ${stats.trackedRivals}`);
-        }
-    }
-}, 300000); // Every 5 minutes
-
-// AI kick result recording function
-// Enhanced AI kick result recording function
-async function recordKickResult(rivalData, success, reason = '', has3sError = false) {
-    if (!config.aiPilotToggle || !rivalData.kickStartTime) {
-        return;
-    }
-    
-    try {
-        const executionTime = Date.now() - rivalData.kickStartTime;
-        const actualTiming = rivalData.predictedTiming || 0;
-        const rivalName = rivalData.name;
-
-        await aiTimingPredictor.recordKickResult(
-            rivalName,
-            actualTiming,
-            success,
-            has3sError,
-            executionTime
-        );
-        
-        const status = success ? '✅' : '❌';
-        const errorFlag = has3sError ? ' [3s ERROR]' : '';
-        appLog(`📊 AI: ${status} ${rivalName} (${actualTiming}ms)${errorFlag}`);
-    } catch (error) {
-        appLog(`❌ Error recording AI kick result: ${error.message}`);
-    }
-}
-
-// Enhanced AI performance stats for monitoring
-function getAIPerformanceStats() {
-    if (!aiTimingPredictor || !aiTimingPredictor.getStats) {
-        return { enabled: false, error: 'AI Timing Predictor not initialized' };
-    }
-    
-    try {
-        const stats = aiTimingPredictor.getStats();
-        return {
-            enabled: aiTimingPredictor.isEnabled,
-            ...stats,
-            timestamp: new Date().toISOString()
-        };
-    } catch (error) {
-        return { enabled: false, error: error.message };
-    }
-}
 
 let rivalProcessingTimeout = null;
 let founderIds = new Set();
@@ -245,6 +338,975 @@ async function getMonitoringConnection() {
     }
     return getConnection(true, true);
 }
+
+// MISSING FUNCTIONS FROM AI PILOT CONTEXT
+
+// Apply timing constraints based on AI pilot context requirements
+function applyTimingConstraints(timing, mode) {
+    const isAttack = mode === 'attack';
+    
+    // **BALANCED CONSTRAINTS - ALLOW MORE VARIANCE**
+    const minTime = isAttack ? 1350 : 1450;  // Lower minimums: Attack: 1350ms, Defense: 1450ms
+    const maxTime = isAttack ? 1750 : 1850;  // Higher maximums: Attack: 1750ms, Defense: 1850ms
+    
+    if (timing < minTime) {
+        appLog(`⚠️🛡️ Timing ${timing}ms below safe ${mode} range, adjusting to ${minTime}ms`);
+        return minTime;
+    }
+    
+    if (timing > maxTime) {
+        appLog(`⚠️ Timing ${timing}ms above safe ${mode} range, adjusting to ${maxTime}ms`);
+        return maxTime;
+    }
+    
+    return Math.round(timing);
+}
+
+// Get rival activity level for AI prediction
+function getRivalActivityLevel(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile) return 0.7; // Default activity level
+    
+    const now = Date.now();
+    const recentActivity = profile.activities.filter(a => now - a.timestamp < 10000); // Last 10 seconds
+    
+    if (recentActivity.length === 0) return 0.3; // Low activity
+    
+    // Calculate activity based on frequency of actions
+    const avgInterval = recentActivity.length > 1 ? 
+        (recentActivity[recentActivity.length - 1].timestamp - recentActivity[0].timestamp) / recentActivity.length : 1000;
+        
+    return Math.min(1.0, Math.max(0.1, 1000 / avgInterval));
+}
+
+// Get rival movement frequency
+function getRivalMovementFreq(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.movements) return 0.5;
+    
+    const now = Date.now();
+    const recentMovements = profile.movements.filter(m => now - m.timestamp < 30000); // Last 30 seconds
+    
+    return Math.min(1.0, recentMovements.length / 10); // Normalize to 0-1
+}
+
+// Get rival interaction rate
+function getRivalInteractionRate(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.interactions) return 0.6;
+    
+    const now = Date.now();
+    const recentInteractions = profile.interactions.filter(i => now - i.timestamp < 20000); // Last 20 seconds
+    
+    return Math.min(1.0, recentInteractions.length / 5); // Normalize to 0-1
+}
+
+// Get current system load
+function getSystemLoad() {
+    // Simple system load approximation based on connection pool usage
+    const activeConnections = connectionPool.filter(c => c.state === CONNECTION_STATES.READY).length;
+    const maxConnections = POOL_MAX_SIZE;
+    
+    return Math.min(1.0, activeConnections / maxConnections);
+}
+
+// Enhanced 3-second rule processing with AI feedback
+function processThreeSecondRuleFeedback(rivalId, predictedTiming, isThreeSecondRule) {
+    if (!aiPredictorEnabled || !rivalId) return;
+    
+    // Immediate feedback to AI predictor for learning
+    const feedback = {
+        rivalId: rivalId,
+        predictedTiming: predictedTiming,
+        success: !isThreeSecondRule,
+        wasThreeSecondRule: isThreeSecondRule,
+        timingError: isThreeSecondRule ? 50 : 0, // Estimate error magnitude
+        timestamp: Date.now()
+    };
+    
+    // Process feedback immediately (within 50ms as per AI pilot context)
+    aiPredictor.processFeedback(
+        rivalId,
+        predictedTiming,
+        !isThreeSecondRule,
+        Date.now() - (lastKickedRival?.loginTime || Date.now()),
+        feedback
+    ).catch(error => {
+        appLog(`❌ AI Feedback processing error: ${error.message}`);
+    });
+    
+    appLog(`📊 AI Feedback sent: Rival=${rivalId}, 3sRule=${isThreeSecondRule}, Success=${!isThreeSecondRule}`);
+}
+
+// 5. ENHANCED 3-SECOND RULE RECOVERY (Add this new function)
+// Add this function to better handle 3-second rule recovery:
+
+function processThreeSecondRuleRecovery(rivalId, predictedTiming, isThreeSecondRule, mode) {
+    if (!isThreeSecondRule) return; // No recovery needed
+    
+    const rivalProfile = rivalActivityProfiles.get(rivalId);
+    if (!rivalProfile) return;
+    
+    // **HUMAN-AWARE 3-SECOND RULE RECOVERY**
+    const humanProbability = assessHumanLikelihood(rivalId, rivalProfile.name || 'unknown', rivalProfile.loginTime);
+    
+    let adjustmentAmount;
+    if (humanProbability >= 0.7) {
+        // Conservative adjustment for humans
+        adjustmentAmount = 80 + (Math.random() * 40); // 80-120ms for humans
+        appLog(`👤⚡ Human 3s Rule Recovery: +${adjustmentAmount.toFixed(0)}ms for human rival`);
+    } else {
+        // More aggressive for suspected bots
+        adjustmentAmount = 40 + (Math.random() * 30); // 40-70ms for bots
+        appLog(`🤖⚡ Bot 3s Rule Recovery: +${adjustmentAmount.toFixed(0)}ms for bot rival`);
+    }
+    
+    // Apply the adjustment to AI predictor if available
+    if (aiPredictorEnabled && aiPredictor.applyImmediateAdjustment) {
+        aiPredictor.applyImmediateAdjustment(rivalId, adjustmentAmount);
+    }
+    
+    // Also adjust manual timing for this RC/mode combination
+    const rcKey = activeConnection ? activeConnection.rcKey : 'RC1';
+    const globalStateForRC = globalTimingState[rcKey];
+    
+    if (mode === 'attack') {
+        globalStateForRC.attack.currentTime = Math.min(
+            globalStateForRC.attack.currentTime + adjustmentAmount,
+            1700 // Don't exceed maximum
+        );
+    } else {
+        globalStateForRC.defense.currentTime = Math.min(
+            globalStateForRC.defense.currentTime + adjustmentAmount,
+            1800 // Don't exceed maximum
+        );
+    }
+    
+    appLog(`🔧 Applied 3s Rule Recovery: ${mode} timing adjusted by +${adjustmentAmount.toFixed(0)}ms`);
+}
+
+// Rival activity tracking system
+let rivalActivityProfiles = new Map(); // rivalId -> activity profile
+
+// Track rival activity for AI prediction enhancement - ENHANCED WITH MEMORY MANAGEMENT
+function trackRivalActivity(rivalId, activityType, data = {}) {
+    // Use the safe memory-managed version if available
+    if (galaxyImprovement && galaxyImprovement.safeAddToRivalActivityProfiles) {
+        const profile = rivalActivityProfiles.get(rivalId) || {
+            activities: [],
+            movements: [],
+            interactions: [],
+            loginTime: Date.now(),
+            sessionDuration: 0,
+            lastActivityTime: Date.now(),
+            activityIntervals: [],
+            responseDelays: [],
+            movementVariability: [],
+            interactionComplexity: 0
+        };
+        
+        // Update profile data
+        const timestamp = Date.now();
+        switch (activityType) {
+            case 'activity':
+                // CRITICAL: Update loginTime if this is a new join activity (rival rejoining)
+                if (data.type === 'join') {
+                    const newLoginTime = Date.now();
+                    profile.activities = [];
+                    profile.movements = [];
+                    profile.interactions = [];
+                    profile.loginTime = newLoginTime;
+                    profile.sessionDuration = 0;
+                    profile.lastActivityTime = newLoginTime;
+                    profile.activityIntervals = [];
+                    profile.responseDelays = [];
+                    profile.movementVariability = [];
+                    profile.interactionComplexity = 0;
+                    appLog(`🔄 Activity Profile Reset: ${rivalId} rejoined - new loginTime: ${newLoginTime}`);
+                }
+                
+                if (profile.lastActivityTime) {
+                    const interval = timestamp - profile.lastActivityTime;
+                    profile.activityIntervals.push(interval);
+                    if (profile.activityIntervals.length > 20) {
+                        profile.activityIntervals = profile.activityIntervals.slice(-20);
+                    }
+                }
+                profile.activities.push({ 
+                    timestamp, 
+                    level: data.level || Math.random(),
+                    intensity: data.intensity || Math.random(),
+                    ...data 
+                });
+                if (profile.activities.length > 50) {
+                    profile.activities = profile.activities.slice(-50);
+                }
+                profile.lastActivityTime = timestamp;
+                break;
+                
+            case 'movement':
+                const movementDelay = data.delay || (timestamp - (data.lastMovement || timestamp));
+                profile.movementVariability.push(movementDelay);
+                if (profile.movementVariability.length > 15) {
+                    profile.movementVariability = profile.movementVariability.slice(-15);
+                }
+                profile.movements.push({ 
+                    timestamp, 
+                    instant: movementDelay < 50,
+                    delay: movementDelay, 
+                    towardExit: data.towardExit || false,
+                    ...data 
+                });
+                if (profile.movements.length > 30) {
+                    profile.movements = profile.movements.slice(-30);
+                }
+                break;
+                
+            case 'interaction':
+                const responseTime = data.responseTime || 200;
+                profile.responseDelays.push(responseTime);
+                if (profile.responseDelays.length > 10) {
+                    profile.responseDelays = profile.responseDelays.slice(-10);
+                }
+                if (responseTime > 150) profile.interactionComplexity += 1;
+                if (data.complex) profile.interactionComplexity += 2;
+                profile.interactions.push({ 
+                    timestamp, 
+                    responseTime, 
+                    complex: data.complex || false,
+                    ...data 
+                });
+                if (profile.interactions.length > 20) {
+                    profile.interactions = profile.interactions.slice(-20);
+                }
+                break;
+        }
+        
+        // Safely add to map with memory management
+        galaxyImprovement.safeAddToRivalActivityProfiles(rivalId, profile);
+    } else {
+        // Fallback to original logic if improvement system not available
+        if (!rivalActivityProfiles.has(rivalId)) {
+            rivalActivityProfiles.set(rivalId, {
+                activities: [],
+                movements: [],
+                interactions: [],
+                loginTime: Date.now(),
+                sessionDuration: 0,
+                lastActivityTime: Date.now(),
+                activityIntervals: [],
+                responseDelays: [],
+                movementVariability: [],
+                interactionComplexity: 0
+            });
+        }
+        
+        const profile = rivalActivityProfiles.get(rivalId);
+        const timestamp = Date.now();
+        
+        // Fallback processing
+        switch (activityType) {
+            case 'activity':
+                profile.activities.push({ timestamp, ...data });
+                profile.lastActivityTime = timestamp;
+                break;
+            case 'movement':
+                profile.movements.push({ timestamp, ...data });
+                break;
+            case 'interaction':
+                profile.interactions.push({ timestamp, ...data });
+                break;
+        }
+    }
+}
+
+// 2. HUMAN DETECTION HELPER FUNCTIONS
+
+// Check for variable human-like delays in actions
+function checkVariableHumanDelay(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 3) return false;
+    
+    const recentActivities = profile.activities.slice(-10); // Last 10 activities
+    const intervals = [];
+    
+    for (let i = 1; i < recentActivities.length; i++) {
+        intervals.push(recentActivities[i].timestamp - recentActivities[i-1].timestamp);
+    }
+    
+    if (intervals.length < 2) return false;
+    
+    // Calculate variance - humans have more variable timing
+    const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((acc, val) => acc + Math.pow(val - avg, 2), 0) / intervals.length;
+    const stdDev = Math.sqrt(variance);
+    
+    // Humans typically have stdDev > 100ms, bots have very low variance
+    return stdDev > 100;
+}
+
+// Detect human interaction patterns
+function detectHumanInteractionPatterns(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile) return false;
+    
+    const humanIndicators = [
+        // Variable activity levels (not constant)
+        profile.activities && profile.activities.length > 5 && 
+        profile.activities.some(a => a.level !== profile.activities[0].level),
+        
+        // Natural movement patterns
+        profile.movements && profile.movements.length > 3 &&
+        !profile.movements.every(m => m.instant === true),
+        
+        // Interaction delays showing thought process
+        profile.interactions && profile.interactions.length > 2 &&
+        profile.interactions.some(i => i.responseTime > 200), // >200ms response time
+    ];
+    
+    return humanIndicators.filter(Boolean).length >= 2; // At least 2 human indicators
+}
+
+// Check for natural activity patterns
+function checkNaturalActivityPattern(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 5) return false;
+    
+    const now = Date.now();
+    const recentActivities = profile.activities.filter(a => now - a.timestamp < 30000); // Last 30 seconds
+    
+    // Natural patterns: not perfectly consistent, some pauses, variable intensity
+    const hasNaturalPauses = recentActivities.some((activity, i) => {
+        if (i === 0) return false;
+        const gap = activity.timestamp - recentActivities[i-1].timestamp;
+        return gap > 1000 && gap < 5000; // 1-5 second natural pauses
+    });
+    
+    const hasVariableIntensity = recentActivities.length > 0 && 
+        !recentActivities.every(a => a.intensity === recentActivities[0].intensity);
+    
+    return hasNaturalPauses || hasVariableIntensity;
+}
+
+// Detection cache to prevent duplicate logging
+let detectionCache = new Map(); // rivalId -> { result, timestamp, logged }
+
+// SESSION DURATION-BASED human likelihood assessment (Updated with 2250ms baseline)
+function assessHumanLikelihood(rivalId, rivalName, loginTime) {
+    const sessionDuration = Date.now() - (loginTime || Date.now());
+    
+    // **NEW BASELINE LOGIC**: >= 2250ms = Human, < 2250ms = Bot
+    // For current session duration assessment
+    if (sessionDuration >= 2250) {
+        // Removed noisy bot detection log
+        return 0.8; // High human probability for long sessions
+    } else if (sessionDuration < 2250) {
+        // Removed noisy bot detection log  
+        return 0.2; // Low human probability for short sessions
+    }
+    
+    // Check cache to prevent duplicate detection logging
+    const cached = detectionCache.get(rivalId);
+    const cacheValidTime = 5000; // 5 seconds cache validity
+    
+    if (cached && Date.now() - cached.timestamp < cacheValidTime) {
+        return cached.result; // Return cached result without logging
+    }
+    
+    // **PURE GAMEPLAY ANALYSIS** - Focus entirely on behavior patterns
+    const gameplayFactors = [
+        // Core gameplay behavior indicators (highest weight)
+        { weight: 15, check: hasRoboticTimingConsistency(rivalId), desc: "Robotic timing consistency", isBot: true },
+        { weight: 12, check: showsInstantReactions(rivalId), desc: "Instant reactions", isBot: true },
+        { weight: 10, check: hasPerfectActivityPatterns(rivalId), desc: "Perfect activity patterns", isBot: true },
+        
+        // Human behavior indicators
+        { weight: 8, check: checkVariableHumanDelay(rivalId), desc: "Variable timing" },
+        { weight: 7, check: showsThinkingDelays(rivalId), desc: "Shows thinking delays" },
+        { weight: 6, check: hasInconsistentBehavior(rivalId), desc: "Inconsistent behavior patterns" },
+        
+        // Session behavior analysis (gameplay only)
+        { weight: 9, check: sessionDuration < 800 && getRivalActivityLevel(rivalId) === 1.0, desc: "Bot-like quick perfect session", isBot: true },
+        { weight: 5, check: sessionDuration > 2000 && getRivalActivityLevel(rivalId) < 0.8, desc: "Human-like longer imperfect session" },
+        
+        // Movement and activity patterns
+        { weight: 8, check: hasZeroVariationMovements(rivalId), desc: "Zero movement variation", isBot: true },
+        { weight: 6, check: getRivalMovementFreq(rivalId) < 0.7, desc: "Natural movement frequency" }
+    ];
+    
+    let humanScore = 0;
+    let botScore = 0;
+    let maxPossibleScore = 0;
+    const humanIndicators = [];
+    const botIndicators = [];
+    
+    gameplayFactors.forEach(factor => {
+        maxPossibleScore += factor.weight;
+        if (factor.check) {
+            if (factor.isBot) {
+                botScore += factor.weight;
+                botIndicators.push(factor.desc);
+            } else {
+                humanScore += factor.weight;
+                humanIndicators.push(factor.desc);
+            }
+        }
+    });
+    
+    // Calculate final probability based on gameplay evidence
+    const botProbability = maxPossibleScore > 0 ? botScore / maxPossibleScore : 0;
+    const humanProbability = maxPossibleScore > 0 ? humanScore / maxPossibleScore : 0.5;
+    
+    // Determine if it's a bot based on strong bot evidence (80% threshold)
+    const isBot = botProbability >= 0.8;
+    const finalHumanProbability = isBot ? 0.2 : Math.max(0.3, humanProbability);
+    
+    // Cache the result
+    detectionCache.set(rivalId, {
+        result: finalHumanProbability,
+        timestamp: Date.now(),
+        logged: false
+    });
+    
+    // Only log if we haven't logged for this rival recently
+    const shouldLog = !cached || Math.abs((cached.result || 0.5) - finalHumanProbability) > 0.1;
+    
+    if (shouldLog) {
+        if (isBot) {
+            appLog(`🤖 Bot detected via gameplay: ${rivalName} (${(botProbability * 100).toFixed(1)}% bot confidence)`);
+            if (botIndicators.length > 0) {
+                appLog(`   Bot indicators: ${botIndicators.join(', ')}`);
+            }
+        } else {
+            appLog(`👤 Human detected via gameplay: ${rivalName} (${(finalHumanProbability * 100).toFixed(1)}% human confidence)`);
+            if (humanIndicators.length > 0) {
+                appLog(`   Human indicators: ${humanIndicators.join(', ')}`);
+            }
+        }
+        
+        // Mark as logged
+        detectionCache.get(rivalId).logged = true;
+    }
+    
+    return finalHumanProbability;
+}
+
+// **ENHANCED GAMEPLAY-BASED BOT DETECTION FUNCTIONS**
+
+// Check for robotic timing consistency (strongest bot indicator)
+function hasRoboticTimingConsistency(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activityIntervals || profile.activityIntervals.length < 4) return false;
+    
+    const intervals = profile.activityIntervals.slice(-6); // Last 6 intervals
+    if (intervals.length < 4) return false;
+    
+    // Check for extremely consistent timing (variance < 10ms = very likely bot)
+    const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const maxDeviation = Math.max(...intervals.map(interval => Math.abs(interval - avgInterval)));
+    
+    const isRobotic = maxDeviation < 10; // Less than 10ms deviation = robotic
+    
+    if (isRobotic) {
+        appLog(`🤖⏱️ Robotic timing detected: max deviation ${maxDeviation.toFixed(1)}ms (avg: ${avgInterval.toFixed(1)}ms)`);
+    }
+    
+    return isRobotic;
+}
+
+// Check for instant reactions (bot indicator)
+function showsInstantReactions(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.responseDelays || profile.responseDelays.length < 3) return false;
+    
+    // Check for multiple responses under 50ms (very unlikely for humans)
+    const instantReactions = profile.responseDelays.filter(delay => delay < 50).length;
+    const totalReactions = profile.responseDelays.length;
+    
+    const hasInstantReactions = (instantReactions / totalReactions) >= 0.6; // 60%+ instant = bot
+    
+    if (hasInstantReactions) {
+        appLog(`🤖⚡ Instant reactions detected: ${instantReactions}/${totalReactions} under 50ms`);
+    }
+    
+    return hasInstantReactions;
+}
+
+// Check for perfect activity patterns (bot indicator)
+function hasPerfectActivityPatterns(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 5) return false;
+    
+    // Check for perfect consistency in activity levels
+    const activities = profile.activities.slice(-8);
+    const levels = activities.map(a => a.level || 0.5);
+    
+    // Perfect patterns: all levels identical or following exact pattern
+    const uniqueLevels = new Set(levels.map(l => Math.round(l * 100))); // Round to avoid floating point issues
+    const isPerfect = uniqueLevels.size <= 2 && levels.length >= 5; // Only 1-2 unique activity levels
+    
+    if (isPerfect) {
+        appLog(`🤖📊 Perfect activity pattern detected: ${uniqueLevels.size} unique levels in ${levels.length} activities`);
+    }
+    
+    return isPerfect;
+}
+
+// Check for zero movement variation (strong bot indicator)
+function hasZeroVariationMovements(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.movementVariability || profile.movementVariability.length < 4) return false;
+    
+    // Check if all movements have identical timing
+    const movements = profile.movementVariability.slice(-6);
+    const uniqueTimings = new Set(movements);
+    
+    const hasZeroVariation = uniqueTimings.size <= 2 && movements.length >= 4; // Almost identical timings
+    
+    if (hasZeroVariation) {
+        appLog(`🤖🎯 Zero movement variation detected: ${uniqueTimings.size} unique timings in ${movements.length} movements`);
+    }
+    
+    return hasZeroVariation;
+}
+
+// Check for inconsistent behavior patterns (humans are less predictable)
+function hasInconsistentBehavior(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activities || profile.activities.length < 5) return true; // Default to human if no data
+    
+    const activities = profile.activities.slice(-10); // Last 10 activities
+    
+    // Check for variation in activity levels (humans vary more)
+    const levels = activities.map(a => a.level || 0.5);
+    const avgLevel = levels.reduce((a, b) => a + b, 0) / levels.length;
+    const hasLevelVariation = levels.some(level => Math.abs(level - avgLevel) > 0.15);
+    
+    // Check for irregular timing between activities
+    const intervals = [];
+    for (let i = 1; i < activities.length; i++) {
+        intervals.push(activities[i].timestamp - activities[i-1].timestamp);
+    }
+    
+    if (intervals.length < 2) return hasLevelVariation;
+    
+    const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const hasTimingInconsistency = intervals.some(interval => Math.abs(interval - avgInterval) > avgInterval * 0.3);
+    
+    return hasLevelVariation || hasTimingInconsistency;
+}
+
+// Check for human-like timing variance (bots have very consistent timing)
+function hasHumanTimingVariance(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.activityIntervals || profile.activityIntervals.length < 3) return true; // Default to human if no data
+    
+    const intervals = profile.activityIntervals.slice(-8); // Last 8 intervals
+    if (intervals.length < 3) return true;
+    
+    // Calculate coefficient of variation
+    const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+    const variance = intervals.reduce((acc, val) => acc + Math.pow(val - avg, 2), 0) / intervals.length;
+    const stdDev = Math.sqrt(variance);
+    const coefficientOfVariation = avg > 0 ? stdDev / avg : 0;
+    
+    // Humans typically have coefficient of variation > 0.15, bots have much lower
+    return coefficientOfVariation > 0.15;
+}
+
+// Check for thinking delays (humans pause to think)
+function showsThinkingDelays(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.responseDelays || profile.responseDelays.length < 3) return true; // Default to human
+    
+    const delays = profile.responseDelays.slice(-5); // Last 5 response delays
+    
+    // Check for delays > 300ms (human thinking time)
+    const hasThinkingDelays = delays.some(delay => delay > 300);
+    
+    // Check for variation in response times
+    const avgDelay = delays.reduce((a, b) => a + b, 0) / delays.length;
+    const hasVariation = delays.some(delay => Math.abs(delay - avgDelay) > 100);
+    
+    return hasThinkingDelays || hasVariation;
+}
+
+// Check for complex activity patterns (humans have more diverse behavior)
+function hasComplexActivityPattern(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile) return false;
+    
+    let complexityScore = 0;
+    
+    // Check activity diversity
+    if (profile.activities && profile.activities.length > 5) {
+        const uniqueLevels = new Set(profile.activities.map(a => Math.round((a.level || 0.5) * 10)));
+        if (uniqueLevels.size > 3) complexityScore++;
+    }
+    
+    // Check movement diversity
+    if (profile.movements && profile.movements.length > 3) {
+        const hasVariedMovements = profile.movements.some(m => !m.instant) && profile.movements.some(m => m.instant);
+        if (hasVariedMovements) complexityScore++;
+    }
+    
+    // Check interaction complexity
+    if (profile.interactionComplexity > 2) {
+        complexityScore++;
+    }
+    
+    return complexityScore >= 2;
+}
+
+// **ENHANCED RIVAL TIMING RECORDING FUNCTION**
+// Record when we observe a rival's action timing for adaptive learning
+function recordRivalActionTiming(rivalId, observedTiming, actionType = 'unknown') {
+    if (!aiPredictorEnabled || !rivalId || !observedTiming) return;
+    
+    try {
+        // Record the timing in AI predictor for learning
+        aiPredictor.recordRivalTiming(rivalId, observedTiming);
+        
+        // Track in local activity profiles for immediate adaptive use
+        const profile = rivalActivityProfiles.get(rivalId);
+        if (profile) {
+            // Initialize timing tracking
+            if (!profile.timingHistory) {
+                profile.timingHistory = [];
+            }
+            
+            profile.timingHistory.push({
+                timing: observedTiming,
+                actionType: actionType,
+                timestamp: Date.now()
+            });
+            
+            // Keep recent timings for adaptive response (last 5 for accuracy)
+            if (profile.timingHistory.length > 5) {
+                profile.timingHistory = profile.timingHistory.slice(-5);
+            }
+            
+            // Calculate rival's average timing for immediate adaptation
+            const recentTimings = profile.timingHistory.map(t => t.timing);
+            const avgTiming = recentTimings.reduce((a, b) => a + b, 0) / recentTimings.length;
+            profile.averageObservedTiming = Math.round(avgTiming);
+            
+            appLog(`⏱️ Rival timing recorded: ${rivalId} = ${observedTiming}ms | Avg: ${profile.averageObservedTiming}ms | Observations: ${profile.timingHistory.length}`);
+        }
+    } catch (error) {
+        appLog(`❌ Error recording rival timing: ${error.message}`);
+    }
+}
+
+// **ADAPTIVE RIVAL TIMING OBSERVER**
+// Intelligently estimate and record rival's timing based on session behavior
+function estimateAndRecordRivalTiming(rivalId, rivalName) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile || !profile.loginTime) return null;
+    
+    const sessionDuration = Date.now() - profile.loginTime;
+    const humanLikelihood = assessHumanLikelihood(rivalId, rivalName, profile.loginTime);
+    
+    // **ADAPTIVE ESTIMATION BASED ON GAMEPLAY ANALYSIS**
+    let estimatedTiming;
+    
+    if (humanLikelihood < 0.3) {
+        // Confirmed bot - use bot timing patterns
+        if (sessionDuration < 800) {
+            estimatedTiming = 1420 + (Math.random() * 60); // 1420-1480ms (fast bot)
+        } else if (sessionDuration < 1500) {
+            estimatedTiming = 1450 + (Math.random() * 80); // 1450-1530ms (medium bot)
+        } else {
+            estimatedTiming = 1480 + (Math.random() * 100); // 1480-1580ms (slower bot)
+        }
+        
+        appLog(`🤖⏱️ Bot timing estimated: ${rivalName} = ${Math.round(estimatedTiming)}ms (session: ${sessionDuration}ms)`);
+    } else {
+        // Suspected human - use conservative human timing
+        if (sessionDuration < 1500) {
+            estimatedTiming = 1550 + (Math.random() * 100); // 1550-1650ms 
+        } else if (sessionDuration < 3000) {
+            estimatedTiming = 1580 + (Math.random() * 120); // 1580-1700ms
+        } else {
+            estimatedTiming = 1600 + (Math.random() * 150); // 1600-1750ms (human)
+        }
+        
+        appLog(`👤⏱️ Human timing estimated: ${rivalName} = ${Math.round(estimatedTiming)}ms (session: ${sessionDuration}ms)`);
+    }
+    
+    // Fine-tune based on activity patterns
+    const activityLevel = getRivalActivityLevel(rivalId);
+    if (activityLevel >= 0.95) {
+        // Extremely high activity = likely bot
+        estimatedTiming -= 30; // Be faster against bots
+    } else if (activityLevel <= 0.4) {
+        // Low activity = likely human thinking
+        estimatedTiming += 50; // Be more conservative
+    }
+    
+    const finalEstimatedTiming = Math.round(estimatedTiming);
+    
+    // Record the estimated timing for future adaptive predictions
+    recordRivalActionTiming(rivalId, finalEstimatedTiming, 'gameplay_estimated');
+    
+    return finalEstimatedTiming;
+}
+
+// Human-specific protection timing
+function applyHumanProtectionTiming(baseTiming, mode, sessionData) {
+    const isAttack = mode === 'attack';
+    let protectedTiming = baseTiming;
+    
+    // Base human protection - add safety buffer
+    const baseBuffer = isAttack ? 120 : 180; // Attack: +120ms, Defense: +180ms
+    protectedTiming += baseBuffer;
+    
+    // Additional protections based on human confidence
+    if (sessionData.isLikelyHuman >= 0.9) {
+        // Very confident human - maximum protection
+        protectedTiming += isAttack ? 80 : 120; // Extra 80/120ms
+        appLog(`👤🛡️ Maximum human protection applied: +${baseBuffer + (isAttack ? 80 : 120)}ms total`);
+    } else if (sessionData.isLikelyHuman >= 0.8) {
+        // Confident human - high protection
+        protectedTiming += isAttack ? 50 : 80; // Extra 50/80ms
+        appLog(`👤🛡️ High human protection applied: +${baseBuffer + (isAttack ? 50 : 80)}ms total`);
+    } else if (sessionData.isLikelyHuman >= 0.7) {
+        // Likely human - moderate protection
+        protectedTiming += isAttack ? 30 : 50; // Extra 30/50ms
+        appLog(`👤🛡️ Moderate human protection applied: +${baseBuffer + (isAttack ? 30 : 50)}ms total`);
+    }
+    
+    // Session duration protection (longer sessions = more likely human)
+    if (sessionData.sessionDuration > 5000) { // 5+ seconds
+        protectedTiming += 40;
+        appLog(`👤⏱️ Long session protection: +40ms (session: ${sessionData.sessionDuration}ms)`);
+    }
+    
+    // Variable activity protection
+    if (sessionData.hasVariableDelay) {
+        protectedTiming += 30;
+        appLog(`👤🎯 Variable activity protection: +30ms`);
+    }
+    
+    return Math.round(protectedTiming);
+}
+
+// Preemptive logout detection system
+function detectPreemptiveLogout(rivalId) {
+    const profile = rivalActivityProfiles.get(rivalId);
+    if (!profile) return { shouldKick: false, confidence: 0 };
+    
+    const now = Date.now();
+    const recentActivity = profile.activities.filter(a => now - a.timestamp < 5000); // Last 5 seconds
+    
+    // Check for pre-logout signals
+    const activityDrop = recentActivity.length < 2; // Very low recent activity
+    const longSession = profile.sessionDuration > 10000; // Session longer than 10 seconds
+    const movementToExit = profile.movements.some(m => now - m.timestamp < 2000 && m.towardExit);
+    
+    let logoutProbability = 0;
+    if (activityDrop) logoutProbability += 0.4;
+    if (longSession) logoutProbability += 0.3;
+    if (movementToExit) logoutProbability += 0.3;
+    
+    const shouldKick = logoutProbability >= 0.8;
+    
+    if (shouldKick) {
+        appLog(`⚡ Preemptive logout detected for rival ${rivalId}: probability=${logoutProbability.toFixed(2)}`);
+    }
+    
+    return {
+        shouldKick,
+        confidence: logoutProbability,
+        timing: now + 12 // Kick 12ms from now (within 0-15ms range)
+    };
+}
+
+// Enhanced JSON logging system for ML training
+class MLDataLogger {
+    constructor() {
+        this.logPath = path.join(__dirname, 'ai_training_data.json');
+        this.logBatch = [];
+        this.batchSize = 10;
+        this.flushInterval = 5000; // 5 seconds
+        
+        // Start periodic flushing
+        if (!this.flushTimer) {
+            this.flushTimer = setInterval(() => this.flushLogs(), this.flushInterval);
+        }
+    }
+    
+    logPrediction(rivalId, mode, predictedTiming, features, confidence = 0.5) {
+        const logEntry = {
+            timestamp: Date.now(),
+            sessionId: `${rivalId}_${Date.now()}`,
+            eventType: 'prediction',
+            rivalId,
+            mode,
+            predictedTiming,
+            confidence,
+            features,
+            gameState: {
+                connectionState: activeConnection ? activeConnection.state : 'none',
+                poolSize: connectionPool.length,
+                processingRival: isProcessingRivalAction
+            },
+            networkConditions: {
+                latency: activeConnection ? activeConnection.lastPingTime || 50 : 50,
+                systemLoad: getSystemLoad()
+            }
+        };
+        
+        this.logBatch.push(logEntry);
+        
+        if (this.logBatch.length >= this.batchSize) {
+            this.flushLogs();
+        }
+    }
+    
+    logOutcome(rivalId, predictedTiming, success, actualDuration, additionalData = {}) {
+        const logEntry = {
+            timestamp: Date.now(),
+            eventType: 'outcome',
+            rivalId,
+            predictedTiming,
+            success,
+            actualDuration,
+            timingError: success ? 0 : (additionalData.timingError || 50),
+            wasThreeSecondRule: additionalData.wasThreeSecondRule || false,
+            learningTrigger: !success, // Trigger learning on failures
+            adjustmentMade: additionalData.adjustmentMade || 0,
+            ...additionalData
+        };
+        
+        this.logBatch.push(logEntry);
+        
+        if (this.logBatch.length >= this.batchSize) {
+            this.flushLogs();
+        }
+    }
+    
+    async flushLogs() {
+        if (this.logBatch.length === 0) return;
+        
+        try {
+            let existingLogs = [];
+            try {
+                const data = await fs.readFile(this.logPath, 'utf8');
+                existingLogs = JSON.parse(data);
+            } catch (error) {
+                // File doesn't exist or is empty
+                existingLogs = [];
+            }
+            
+            // Add new logs
+            existingLogs.push(...this.logBatch);
+            
+            // Keep only recent logs (last 5000 entries)
+            if (existingLogs.length > 5000) {
+                existingLogs = existingLogs.slice(-5000);
+            }
+            
+            // Write asynchronously to prevent timing delays
+            await fs.writeFile(this.logPath, JSON.stringify(existingLogs, null, 2));
+            
+            appLog(`📋 ML Data: Logged ${this.logBatch.length} entries to training data`);
+            this.logBatch = [];
+            
+        } catch (error) {
+            appLog(`❌ ML Data logging error: ${error.message}`);
+        }
+    }
+}
+
+// Initialize ML data logger
+const mlDataLogger = new MLDataLogger();
+
+// Initialize Galaxy Service Improvement System
+async function initializeGalaxyImprovement() {
+    try {
+        galaxyImprovement = new GalaxyServiceImprovement();
+        
+        // Set up global references for the improvement system
+        global.rivalActivityProfiles = rivalActivityProfiles;
+        global.trackedRivals = trackedRivals;
+        global.userMap = userMap;
+        global.detectionCache = detectionCache;
+        global.config = config;
+        
+        // Initialize the system
+        await galaxyImprovement.initialize();
+        
+        appLog('🚀 Galaxy Service Improvement System fully integrated');
+        
+    } catch (error) {
+        appLog('❌ Failed to initialize Galaxy Service Improvement:', error.message);
+        // Continue without the improvement system if initialization fails
+    }
+}
+
+// AI-specific error handling (moved to main shutdown handler)
+
+// Initialize system startup check
+setTimeout(() => {
+    appLog(`🚀 Galaxy AI Service fully initialized`);
+    appLog(`🤖 AI Predictor: ${aiPredictorEnabled ? 'ENABLED' : 'DISABLED'}`);
+    appLog(`🎯 Timing Constraints: Attack(1300-1700ms), Defense(1400-1800ms)`);
+    appLog(`📊 ML Data Logging: ${mlDataLogger ? 'ACTIVE' : 'INACTIVE'}`);
+    
+    // Initial system health check (removed noisy log)
+    const healthSummary = {
+        connectionPool: connectionPool.length,
+        trackedRivals: trackedRivals.size,
+        userMap: userMap.size,
+        aiPredictor: aiPredictorEnabled,
+        mlDataLogger: !!mlDataLogger
+    };
+    
+    // Removed noisy system health log
+}, 5000); // 5 seconds after startup
+
+// Enhanced system initialization with human protection
+setTimeout(() => {
+    appLog(`🛡️ ZERO-KICK PROTECTION SYSTEM LOADED`);
+    appLog(`👤 Human Detection: ENABLED`);
+    // Removed noisy timing range log
+    appLog(`⚡ Enhanced 3s Rule Recovery: ACTIVE`);
+    appLog(`🔧 Variable Human Protection: ACTIVE`);
+    
+    // Test human detection on startup (without logging bot detection test)
+    const testHuman = assessHumanLikelihood('test123', 'TestHumanPlayer', Date.now() - 5000);
+    const testBot = assessHumanLikelihood('bot456', 'TestBotPlayer', Date.now() - 1000);
+    
+    appLog(`🧪 Detection Test: Human=${(testHuman * 100).toFixed(1)}%, Bot=${(testBot * 100).toFixed(1)}%`);
+    
+    // Initialize Galaxy Service Improvement System
+    initializeGalaxyImprovement();
+    
+}, 6000); // 6 seconds after startup to ensure all systems are loaded
+
+// PATCH 7: STARTUP VERIFICATION - Add system verification after integration (FROM INTEGRATION PATCH)
+setTimeout(() => {
+    appLog('🔍 System verification after integration:');
+    if (galaxyImprovement) {
+        appLog(`✅ Memory Manager: ${galaxyImprovement.memoryManager ? 'Active' : 'Inactive'}`);
+        appLog(`✅ Error Handler: ${galaxyImprovement.errorHandler ? 'Active' : 'Inactive'}`);
+        appLog(`✅ Improved AI Predictor: ${galaxyImprovement.improvedAIPredictor && galaxyImprovement.improvedAIPredictor.initialized ? 'Active' : 'Inactive'}`);
+        appLog(`✅ Configuration Validation: ${galaxyImprovement.configValidator && galaxyImprovement.configValidator.initialized ? 'Active' : 'Inactive'}`);
+        
+        // Report memory limits
+        if (galaxyImprovement.memoryManager) {
+            try {
+                const usage = galaxyImprovement.memoryManager.getMemoryUsage();
+                appLog(`📊 Memory limits enforced:`, Object.keys(usage));
+            } catch (error) {
+                appLog(`📊 Memory limits enforced: Available`);
+            }
+        }
+    } else {
+        appLog(`❌ Galaxy Service Improvement System: Not Available (fallback mode active)`);
+    }
+}, 10000); // 10 seconds after startup
 
 // Enhanced flag reset function with prison recovery
 function resetProcessingFlag() {
@@ -305,11 +1367,20 @@ setInterval(() => {
 let trackedRivals = new Map(); // Map of rivalId -> { name, loginTime, mode, connection, coordinate, kickTimeout, presenceCheckTimeout }
 
 
-// Memory optimization constants
+// Memory optimization constants - ENHANCED
 const MAX_USER_MAP_SIZE = 1000;
 const MAX_TRACKED_RIVALS = 50;
+const MAX_RIVAL_ACTIVITY_PROFILES = 500; // NEW: Limit for activity profiles
 const MEMORY_CLEANUP_INTERVAL = 60000; // 60 seconds (adaptive)
-const RIVAL_EXPIRE_TIME = 300000; // 5 minutes
+const RIVAL_EXPIRE_TIME = 1800000; // 30 minutes (increased from 5)
+const ACTIVITY_PROFILE_MAX_AGE = 1800000; // 30 minutes
+
+// NEW: Batch processing synchronization
+let batchProcessing = false;
+let memoryCleanupInProgress = false;
+
+// NEW: Reverse lookup map for performance
+const userIdToNameMap = new Map();
 
 // Timing precision enhancement
 let timingDriftCorrection = 0;
@@ -402,9 +1473,85 @@ function updateTimingStats(actualDelay, expectedDelay) {
     timingStats.maxDelay = Math.max(timingStats.maxDelay, delay);
 }
 
-// Start memory cleanup and timing measurement intervals
+// Performance monitoring and cleanup intervals
 setInterval(performMemoryCleanup, MEMORY_CLEANUP_INTERVAL);
 setInterval(measureTimingDrift, 300000); // Every 5 minutes
+
+// PATCH 5: PERFORMANCE MONITORING - Add system status reporting (FROM INTEGRATION PATCH)
+setInterval(() => {
+    if (galaxyImprovement && typeof galaxyImprovement.getSystemStatus === 'function') {
+        try {
+            const status = galaxyImprovement.getSystemStatus();
+            
+            // Log warnings for high resource usage
+            if (status.memoryManager && status.memoryManager.usage) {
+                for (const [mapName, usage] of Object.entries(status.memoryManager.usage)) {
+                    if (parseFloat(usage.percentage) > 80) {
+                        appLog(`🚨 High memory usage: ${mapName} at ${usage.percentage}`);
+                    }
+                }
+            }
+            
+            // Log error count increases
+            if (status.errorHandler && status.errorHandler.stats && status.errorHandler.stats.totalErrors > 0) {
+                const recentErrors = status.errorHandler.stats.recentErrors.length;
+                if (recentErrors > 5) { // More than 5 recent errors
+                    appLog(`⚠️ High error rate: ${recentErrors} recent errors`);
+                }
+            }
+        } catch (error) {
+            // Don't log monitoring errors unless debugging
+        }
+    }
+}, 300000); // Every 5 minutes
+
+// PATCH 6: AI PREDICTOR CLEANUP - Add to existing cleanup intervals (FROM INTEGRATION PATCH)
+setInterval(() => {
+    // Clean up AI predictor memory if available
+    if (galaxyImprovement && galaxyImprovement.improvedAIPredictor && 
+        typeof galaxyImprovement.improvedAIPredictor.performMemoryOptimization === 'function') {
+        try {
+            galaxyImprovement.improvedAIPredictor.performMemoryOptimization();
+        } catch (error) {
+            // Silent error handling for memory cleanup
+        }
+    }
+}, 60000); // Every minute
+
+// AI Predictor performance monitoring
+setInterval(async () => {
+    if (aiPredictorEnabled && aiPredictor.initialized) {
+        const performance = aiPredictor.getPerformanceSummary();
+        if (performance.totalPredictions > 0) {
+            appLog(`🤖 AI Performance: ${performance.overallAccuracy}% accuracy, ${performance.rivalsTracked} rivals tracked, avg rival accuracy: ${performance.averageRivalAccuracy}%`);
+        }
+        
+        // Save AI data periodically
+        try {
+            await aiPredictor.saveData();
+        } catch (error) {
+            appLog(`❌ AI data save error: ${error.message}`);
+        }
+    }
+}, 600000); // Every 10 minutes
+
+// Enhanced rival activity cleanup with AI integration
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    
+    // Clean up old rival activity profiles
+    for (const [rivalId, profile] of rivalActivityProfiles.entries()) {
+        if (now - profile.loginTime > 600000) { // 10 minutes old
+            rivalActivityProfiles.delete(rivalId);
+            cleaned++;
+        }
+    }
+    
+    if (cleaned > 0) {
+        appLog(`🧼 Cleaned ${cleaned} old rival activity profiles`);
+    }
+}, 300000); // Every 5 minutes
 
 // Conditional health reporting (every 10 minutes, only if active)
 setInterval(() => {
@@ -509,7 +1656,10 @@ function processBatch() {
     
     // Process all rivals in batch
     batch.forEach(({ rival, mode, connection }) => {
-        if (!trackedRivals.has(rival.id)) {
+        const existingRivalData = trackedRivals.get(rival.id);
+        
+        if (!existingRivalData) {
+            // New rival - create fresh tracking data
             const rivalData = {
                 name: rival.name,
                 loginTime: Date.now(),
@@ -520,9 +1670,68 @@ function processBatch() {
                 presenceCheckTimeout: null
             };
             trackedRivals.set(rival.id, rivalData);
-            scheduleRivalKick(rival.id, rivalData).catch(err => {
-                appLog(`❌ Error scheduling rival kick: ${err.message}`);
-            });
+            scheduleRivalKick(rival.id, rivalData);
+            appLog(`🆕 New rival tracking: ${rival.name} (${rival.id}) - loginTime: ${rivalData.loginTime}`);
+        } else {
+            // Rival rejoining - update loginTime for new session (CRITICAL: Use single timestamp for both data structures)
+            const newLoginTime = Date.now();
+            
+            // Update trackedRivals first
+            existingRivalData.loginTime = newLoginTime;
+            existingRivalData.mode = mode;
+            existingRivalData.connection = connection;
+            existingRivalData.coordinate = rival.coordinate;
+            
+            // CRITICAL: Synchronize rivalActivityProfiles with EXACT same loginTime
+            let rivalProfile = rivalActivityProfiles.get(rival.id);
+            if (!rivalProfile) {
+                // Create new profile if it doesn't exist
+                rivalProfile = {
+                    activities: [],
+                    movements: [],
+                    interactions: [],
+                    loginTime: newLoginTime,
+                    sessionDuration: 0,
+                    lastActivityTime: newLoginTime,
+                    activityIntervals: [],
+                    responseDelays: [],
+                    movementVariability: [],
+                    interactionComplexity: 0
+                };
+                rivalActivityProfiles.set(rival.id, rivalProfile);
+                appLog(`🔄 Created new Activity Profile: ${rival.id} - loginTime: ${newLoginTime}`);
+            } else {
+                // Clear previous session data for the new session
+                rivalProfile.activities = [];
+                rivalProfile.movements = [];
+                rivalProfile.interactions = [];
+                rivalProfile.loginTime = newLoginTime; // Use EXACT same timestamp
+                rivalProfile.sessionDuration = 0;
+                rivalProfile.lastActivityTime = newLoginTime;
+                rivalProfile.activityIntervals = [];
+                rivalProfile.responseDelays = [];
+                rivalProfile.movementVariability = [];
+                rivalProfile.interactionComplexity = 0;
+                
+                appLog(`🔄 Activity Profile Reset: ${rival.id} rejoined - loginTime synced: ${newLoginTime}`);
+            }
+            
+            // Verify synchronization
+            appLog(`✅ LoginTime Sync Verified: trackedRivals=${existingRivalData.loginTime}, rivalActivityProfiles=${rivalProfile.loginTime}`);
+            
+            // Clear any existing timeouts
+            if (existingRivalData.kickTimeout) {
+                clearTimeout(existingRivalData.kickTimeout);
+                existingRivalData.kickTimeout = null;
+            }
+            if (existingRivalData.presenceCheckTimeout) {
+                clearTimeout(existingRivalData.presenceCheckTimeout);
+                existingRivalData.presenceCheckTimeout = null;
+            }
+            
+            // Schedule new kick with updated loginTime
+            scheduleRivalKick(rival.id, existingRivalData);
+            appLog(`🔄 Rival rejoining: ${rival.name} (${rival.id}) - updated loginTime: ${newLoginTime}`);
         }
     });
     
@@ -729,60 +1938,57 @@ function updateConfigValues(newConfig = null) {
     } else {
         // Fallback to file-based config if WebSocket not available
         try {
-            // Clear require cache if possible
-            try {
-                delete require.cache[require.resolve('./config1.json')];
-            } catch (e) {
-                // Ignore cache clear errors
-            }
-            
+            delete require.cache[require.resolve('./config1.json')];
             const configRaw = fsSync.readFileSync('./config1.json', 'utf8');
             const rawConfig = JSON.parse(configRaw);
             
-            // Map config keys with "1" suffix to expected keys without suffix
+            // Fix the config key mapping - handle both with and without '1' suffix
             config = {};
-            for (const [key, value] of Object.entries(rawConfig)) {
-                if (key.endsWith('1')) {
-                    // Remove the "1" suffix for internal use
-                    const normalizedKey = key.slice(0, -1);
-                    config[normalizedKey] = value;
-                } else {
-                    // Keep keys without suffix as-is
-                    config[key] = value;
-                }
-            }
+            Object.keys(rawConfig).forEach(key => {
+                // Remove '1' suffix from keys for consistency
+                const cleanKey = key.endsWith('1') ? key.slice(0, -1) : key;
+                config[cleanKey] = rawConfig[key];
+                // Also keep original key for backward compatibility
+                config[key] = rawConfig[key];
+            });
             
-            appLog("Config loaded from config1.json file");
+            // Ensure RC1 and RC2 are properly mapped
+            if (rawConfig.RC11) config.RC1 = rawConfig.RC11;
+            if (rawConfig.RC21) config.RC2 = rawConfig.RC21;
+            if (rawConfig.PlanetName1) config.planetName = rawConfig.PlanetName1;
+            
+            // Debug log RC values
+            appLog(`🔧 Config loaded - RC1: ${config.RC1}, RC2: ${config.RC2}`);
+            
+        //    appLog("Config loaded from file (fallback)");
         } catch (error) {
-            appLog("Failed to load config from file:", error);
+        //    appLog("Failed to load config from file:", error);
             return;
         }
     }
+    if (config.aiPredictorEnabled !== undefined) {
+        aiPredictorEnabled = config.aiPredictorEnabled === "true" || config.aiPredictorEnabled === true;
+        appLog(`🧠 AI Predictor ${aiPredictorEnabled ? 'ENABLED' : 'DISABLED'}`);
+    }
     
-    // Process arrays and booleans
-    blackListRival = Array.isArray(config.blackListRival) ? config.blackListRival : 
-        (typeof config.blackListRival === 'string' ? config.blackListRival.split(',').map(name => name.trim()) : []);
-    whiteListMember = Array.isArray(config.whiteListMember) ? config.whiteListMember : 
-        (typeof config.whiteListMember === 'string' ? config.whiteListMember.split(',').map(name => name.trim()) : []);
+    // Process arrays and booleans - handle both with and without '1' suffix
+    const blackListSource = config.blackListRival || config.blackListRival1 || [];
+    const whiteListSource = config.whiteListMember || config.whiteListMember1 || [];
+    
+    blackListRival = Array.isArray(blackListSource) ? blackListSource : 
+        (typeof blackListSource === 'string' ? blackListSource.split(',').map(name => name.trim()) : []);
+    whiteListMember = Array.isArray(whiteListSource) ? whiteListSource : 
+        (typeof whiteListSource === 'string' ? whiteListSource.split(',').map(name => name.trim()) : []);
     
     // Clear rival cache when whitelist/blacklist changes to ensure updates take effect
     rivalCache.clear();
     
-    // Convert booleans - handle both string and boolean values explicitly
-    config.standOnEnemy = config.standOnEnemy === "true" || config.standOnEnemy === true;
-    config.actionOnEnemy = config.actionOnEnemy === "true" || config.actionOnEnemy === true;
-    config.aiChatToggle = config.aiChatToggle === "true" || config.aiChatToggle === true;
-    config.dualRCToggle = config.dualRCToggle === "true" || config.dualRCToggle === true;
-    config.kickAllToggle = config.kickAllToggle === "true" || config.kickAllToggle === true;
-    
-    // Handle both aiPilotToggle and aiTimingToggle (for backward compatibility)
-    config.aiPilotToggle = config.aiPilotToggle === "true" || config.aiPilotToggle === true ||
-                          config.aiTimingToggle === "true" || config.aiTimingToggle === true;
-    
-    // Update AI Timing Predictor state
-    if (aiTimingPredictor) {
-        aiTimingPredictor.setEnabled(config.aiPilotToggle);
-    }
+    // Convert booleans - handle both string and boolean values explicitly, with and without '1' suffix
+    config.standOnEnemy = (config.standOnEnemy || config.standOnEnemy1) === "true" || (config.standOnEnemy || config.standOnEnemy1) === true;
+    config.actionOnEnemy = (config.actionOnEnemy || config.actionOnEnemy1) === "true" || (config.actionOnEnemy || config.actionOnEnemy1) === true;
+    config.aiChatToggle = (config.aiChatToggle || config.aiChatToggle1) === "true" || (config.aiChatToggle || config.aiChatToggle1) === true;
+    config.dualRCToggle = (config.dualRCToggle || config.dualRCToggle1) === "true" || (config.dualRCToggle || config.dualRCToggle1) === true;
+    config.kickAllToggle = (config.kickAllToggle || config.kickAllToggle1) === "true" || (config.kickAllToggle || config.kickAllToggle1) === true;
     
     // Log config updates for debugging
     if (newConfig) {
@@ -807,11 +2013,11 @@ function updateConfigValues(newConfig = null) {
         //     }
         // });
         
-        // Parse timing values from config parameters (Flask API removes '1' suffix)
-        const rc1AttackTime = parseInt(config.RC1_startAttackTime) || 1700;
-        const rc1DefenseTime = parseInt(config.RC1_startDefenceTime) || 1700;
-        const rc2AttackTime = parseInt(config.RC2_startAttackTime) || 1700;
-        const rc2DefenseTime = parseInt(config.RC2_startDefenceTime) || 1725;
+        // Parse timing values from config parameters - handle both with and without '1' suffix
+        const rc1AttackTime = parseInt(config.RC1_startAttackTime || config.RC1_startAttackTime1) || 1700;
+        const rc1DefenseTime = parseInt(config.RC1_startDefenceTime || config.RC1_startDefenceTime1) || 1700;
+        const rc2AttackTime = parseInt(config.RC2_startAttackTime || config.RC2_startAttackTime1) || 1700;
+        const rc2DefenseTime = parseInt(config.RC2_startDefenceTime || config.RC2_startDefenceTime1) || 1725;
         
         // Always update all timing states
         globalTimingState.RC1.attack.currentTime = rc1AttackTime;
@@ -822,7 +2028,9 @@ function updateConfigValues(newConfig = null) {
         globalTimingState.RC2.defense.currentTime = rc2DefenseTime;
         globalTimingState.RC2.currentTime = rc2AttackTime;
         
-        appLog(`🔄 Timing states updated: RC1 Attack=${rc1AttackTime}ms, RC1 Defense=${rc1DefenseTime}ms, RC2 Attack=${rc2AttackTime}ms, RC2 Defense=${rc2DefenseTime}ms`);
+        appLog(`🔄 Global Timing States Updated:`);
+    appLog(`   RC1: Attack=${rc1AttackTime}ms, Defense=${rc1DefenseTime}ms`);
+    appLog(`   RC2: Attack=${rc2AttackTime}ms, Defense=${rc2DefenseTime}ms`);
         
         // Update existing connections immediately
         connectionPool.forEach(conn => {
@@ -894,8 +2102,7 @@ function connectToAPI() {
             response: {
                 status: 'config_applied',
                 timestamp: Date.now(),
-                config_keys: Object.keys(data.config),
-                ai_stats: getAIPerformanceStats()
+                config_keys: Object.keys(data.config)
             }
         });
     });
@@ -922,6 +2129,7 @@ function connectToAPI() {
 
 // Initialize with fallback config and connect to API
 updateConfigValues(); // Load from file initially
+appLog(`🚀 Galaxy service initialized with RC1: ${config.RC1}, RC2: ${config.RC2}`);
 connectToAPI();
 
 // Fallback file watching (only used if WebSocket is not available)
@@ -965,16 +2173,16 @@ function incrementTiming(mode, connection, errorType = 'success') {
     const rcKey = connection.rcKey;
     const globalStateForRC = globalTimingState[rcKey];
     
-    // Parse config values with proper parameter names (Flask API removes '1' suffix)
+    // Parse config values with proper parameter names - handle both with and without '1' suffix
     const configStart = isAttack ? 
-        parseInt(config[`${rcKey}_startAttackTime`]) || 1700 :
-        parseInt(config[`${rcKey}_startDefenceTime`]) || 1700;
+        parseInt(config[`${rcKey}_startAttackTime`] || config[`${rcKey}_startAttackTime1`]) || 1700 :
+        parseInt(config[`${rcKey}_startDefenceTime`] || config[`${rcKey}_startDefenceTime1`]) || 1700;
     const configStop = isAttack ? 
-        parseInt(config[`${rcKey}_stopAttackTime`]) || 1750 :
-        parseInt(config[`${rcKey}_stopDefenceTime`]) || 1775;
+        parseInt(config[`${rcKey}_stopAttackTime`] || config[`${rcKey}_stopAttackTime1`]) || 1750 :
+        parseInt(config[`${rcKey}_stopDefenceTime`] || config[`${rcKey}_stopDefenceTime1`]) || 1775;
     const configInterval = isAttack ? 
-        parseInt(config[`${rcKey}_attackIntervalTime`]) || 5 :
-        parseInt(config[`${rcKey}_defenceIntervalTime`]) || 5;
+        parseInt(config[`${rcKey}_attackIntervalTime`] || config[`${rcKey}_attackIntervalTime1`]) || 5 :
+        parseInt(config[`${rcKey}_defenceIntervalTime`] || config[`${rcKey}_defenceIntervalTime1`]) || 5;
 
     if (errorType !== 'success') {
         globalStateForRC.consecutiveErrors++;
@@ -1005,38 +2213,113 @@ function incrementTiming(mode, connection, errorType = 'success') {
     return modeState.currentTime;
 }
 
-async function getCurrentTiming(mode, connection, rivalData = null) {
-    const isAttack = mode === 'attack';
-    const rcKey = connection.rcKey;
-    const globalStateForRC = globalTimingState[rcKey];
-    
-    // Get manual timing from the specific mode (attack/defense) state
-    let manualTiming;
-    if (isAttack) {
-        manualTiming = globalStateForRC.attack.currentTime !== null ? 
-            globalStateForRC.attack.currentTime : 
-            parseInt(config[`${rcKey}_startAttackTime`]) || 1700;
-    } else {
-        manualTiming = globalStateForRC.defense.currentTime !== null ? 
-            globalStateForRC.defense.currentTime : 
-            parseInt(config[`${rcKey}_startDefenceTime`]) || 1700;
-    }
-    
-    // Check if AI Pilot is enabled
-    if (config.aiPilotToggle && rivalData) {
-        try {
-            // Use AI prediction when enabled
-            const aiTiming = await aiTimingPredictor.predictOptimalTiming(rivalData, connection, manualTiming);
-            appLog(`🤖 AI Timing: mode=${mode}, rcKey=${rcKey}, AI=${aiTiming}ms, manual=${manualTiming}ms`);
-            return Math.max(100, aiTiming);
-        } catch (error) {
-            appLog(`❌ AI Timing error: ${error.message}, falling back to manual timing`);
+// ENHANCED getCurrentTiming with comprehensive error handling - FROM INTEGRATION PATCH
+async function getCurrentTiming(mode, connection, rivalId = null, rivalName = null, loginTime = null) {
+    try {
+        // Use improved AI predictor if available
+        if (galaxyImprovement && galaxyImprovement.improvedAIPredictor && 
+            galaxyImprovement.improvedAIPredictor.initialized && rivalId && rivalName && loginTime) {
+            try {
+                const sessionData = {
+                    activityLevel: getRivalActivityLevel(rivalId) || 0.7,
+                    movementFreq: getRivalMovementFreq(rivalId) || 0.5,
+                    interactionRate: getRivalInteractionRate(rivalId) || 0.6,
+                    networkLatency: connection.lastPingTime || 50,
+                    systemLoad: getSystemLoad(),
+                    currentTime: Date.now(),
+                    sessionDuration: loginTime ? Date.now() - loginTime : 2000,
+                    isLikelyHuman: rivalId ? assessHumanLikelihood(rivalId, rivalName, loginTime) : 0.7,
+                    
+                    // Enhanced human detection
+                    hasVariableDelay: checkVariableHumanDelay(rivalId),
+                    showsHumanPatterns: detectHumanInteractionPatterns(rivalId),
+                    hasNaturalActivity: checkNaturalActivityPattern(rivalId)
+                };
+                
+                const aiTiming = await galaxyImprovement.improvedAIPredictor.predictOptimalTiming(
+                    rivalId, rivalName, loginTime, mode, sessionData
+                );
+                
+                // Apply timing constraints
+                const constrainedTiming = applyTimingConstraints(aiTiming, mode);
+                appLog(`🎯 Enhanced AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms`);
+                return constrainedTiming;
+                
+            } catch (aiError) {
+                appLog(`⚠️ Enhanced AI predictor error, falling back to original AI: ${aiError.message}`);
+                // Fall through to original AI logic
+            }
         }
+        
+        // Original AI predictor fallback
+        if (aiPredictorEnabled && rivalId && rivalName && loginTime) {
+            try {
+                const sessionData = {
+                    activityLevel: getRivalActivityLevel(rivalId) || 0.7,
+                    movementFreq: getRivalMovementFreq(rivalId) || 0.5,
+                    interactionRate: getRivalInteractionRate(rivalId) || 0.6,
+                    networkLatency: connection.lastPingTime || 50,
+                    systemLoad: getSystemLoad(),
+                    currentTime: Date.now(),
+                    sessionDuration: Date.now() - loginTime,
+                    isLikelyHuman: assessHumanLikelihood(rivalId, rivalName, loginTime)
+                };
+                
+                const aiPrediction = await aiPredictor.predictOptimalTiming(
+                    rivalId, rivalName, loginTime, mode, sessionData
+                );
+                
+                // Apply timing constraints
+                const constrainedTiming = applyTimingConstraints(aiPrediction, mode);
+                appLog(`🎯 Original AI Prediction: ${rivalName} (${mode}) = ${constrainedTiming}ms`);
+                return constrainedTiming;
+                
+            } catch (error) {
+                appLog(`❌ Original AI Prediction failed: ${error.message}, falling back to manual timing`);
+            }
+        }
+        
+        // Manual timing logic with enhanced protection
+        const isAttack = mode === 'attack';
+        const rcKey = connection.rcKey;
+        const globalStateForRC = globalTimingState[rcKey];
+        
+        let timing;
+        if (isAttack) {
+            timing = globalStateForRC.attack.currentTime !== null ? 
+                globalStateForRC.attack.currentTime : 
+                parseInt(config[`${rcKey}_startAttackTime`] || config[`${rcKey}_startAttackTime1`]) || 1700;
+        } else {
+            timing = globalStateForRC.defense.currentTime !== null ? 
+                globalStateForRC.defense.currentTime : 
+                parseInt(config[`${rcKey}_startDefenceTime`] || config[`${rcKey}_startDefenceTime1`]) || 1700;
+        }
+        
+        // Enhanced human protection for manual timing
+        if (rivalName && rivalId) {
+            const humanLikelihood = assessHumanLikelihood(rivalId, rivalName, loginTime);
+            if (humanLikelihood >= 0.7) {
+                if (isAttack) {
+                    timing = Math.max(timing + 100, 1600);
+                } else {
+                    timing = Math.max(timing + 150, 1650);
+                }
+                appLog(`👤 Manual Human Protection: ${rivalName} - Extended timing to ${timing}ms`);
+            }
+        }
+        
+        const constrainedTiming = applyTimingConstraints(timing, mode);
+        appLog(`🕰️ Manual Timing: mode=${mode}, rcKey=${rcKey}, timing=${constrainedTiming}ms, rival=${rivalName}`);
+        return constrainedTiming;
+        
+    } catch (error) {
+        appLog(`❌ getCurrentTiming critical error: ${error.message}`);
+        // Safe fallback timing
+        const isAttack = mode === 'attack';
+        const safeTiming = isAttack ? 1600 : 1700;
+        appLog(`🛡️ Using safe fallback timing: ${safeTiming}ms`);
+        return safeTiming;
     }
-    
-    // Fallback to manual timing
-    appLog(`🕰️ Manual Timing: mode=${mode}, rcKey=${rcKey}, timing=${manualTiming}ms`);
-    return Math.max(100, manualTiming);
 }
 
 async function optimizedConnectionPoolMaintenance() {
@@ -1313,7 +2596,15 @@ async function createConnection() {
     
     const rcKey = getNextRC();
     const rcValue = config[rcKey];
-   appLog(`Creating new connection instance with ${rcKey}: ${rcValue}`);
+    
+    // Safety check for undefined RC values
+    if (!rcValue) {
+        appLog(`❌ ERROR: ${rcKey} is undefined! Config RC1: ${config.RC1}, RC2: ${config.RC2}`);
+        appLog(`❌ Available config keys: ${Object.keys(config).join(', ')}`);
+        throw new Error(`RC value ${rcKey} is undefined - check your config file`);
+    }
+    
+    appLog(`Creating new connection instance with ${rcKey}: ${rcValue}`);
     const conn = {
         socket: null,
         state: CONNECTION_STATES.CLOSED,
@@ -1451,38 +2742,6 @@ async function createConnection() {
                 const prisonWords = ["PRISON", "Prison", "Тюрьма"];
                 if (prisonWords.some(word => message.split(/\s+/).includes(word))) {
                  //   appLog(`🔒 Exact prison keyword detected: "${message}"`);
-                    
-                    // Check if this is a successful kick result (rival sent to prison)
-                    if (config.aiPilotToggle && isProcessingRivalAction) {
-                        // Find the rival data that was being processed
-                        for (const [rivalId, rivalData] of trackedRivals.entries()) {
-                            if (rivalData.kickStartTime && Date.now() - rivalData.kickStartTime < 5000) {
-                                recordKickResult(rivalData, true, 'prison_success').catch(err => {
-                                    appLog(`❌ Error recording prison success: ${err.message}`);
-                                });
-                                break;
-                            }
-                        }
-                    } else if (config.aiPilotToggle && !isProcessingRivalAction) {
-                        // This might be our bot getting kicked by a rival - learn from this failure
-                        appLog(`🚨 Detected prison message when not processing rival - our bot may have been kicked`);
-                        
-                        // Try to identify which rival might have kicked us based on recent activity
-                        const recentRivals = Array.from(trackedRivals.entries())
-                            .filter(([id, data]) => Date.now() - data.lastSeen < 10000) // Active in last 10 seconds
-                            .sort((a, b) => b[1].lastSeen - a[1].lastSeen); // Most recent first
-                        
-                        if (recentRivals.length > 0) {
-                            const [rivalId, rivalData] = recentRivals[0];
-                            const estimatedRivalTiming = Date.now() % 3000; // Rough estimate
-                            const ourEstimatedTiming = estimatedRivalTiming + 50; // We were probably slower
-                            
-                            aiTimingPredictor.recordBotGotKicked(rivalData, ourEstimatedTiming, estimatedRivalTiming).catch(err => {
-                                appLog(`❌ Error recording bot got kicked: ${err.message}`);
-                            });
-                        }
-                    }
-                    
                     handlePrisonAutomation(this);
                     return;
                 }
@@ -1614,6 +2873,21 @@ async function createConnection() {
                         break;
                     case "JOIN":
                         handleJoinCommand(parts, this);
+                        // Track rival activity for AI prediction ONLY for actual rivals (blacklist or kickall enabled)
+                        if (parts.length >= 4) {
+                            const rivalName = parts.length >= 5 && REGEX_PATTERNS.userId.test(parts[3]) ? parts[2] : parts[1];
+                            const rivalId = parts.length >= 5 && REGEX_PATTERNS.userId.test(parts[3]) ? parts[3] : parts[2];
+                            
+                            if (rivalId && REGEX_PATTERNS.userId.test(rivalId)) {
+                                // Only track activity for actual rivals
+                                const classification = classifyRival(rivalName, rivalId, this);
+                                if (classification.isRival) {
+                                    const isRejoining = rivalActivityProfiles.has(rivalId);
+                                    trackRivalActivity(rivalId, 'activity', { type: 'join', timestamp: Date.now(), isRejoining });
+                                    appLog(`📊 Tracking JOIN activity for rival: ${rivalName} (${rivalId})`);
+                                }
+                            }
+                        }
                         break;
                     case "PART":
                         if (parts.length >= commandIndex + 2) {
@@ -1625,12 +2899,37 @@ async function createConnection() {
                                     break;
                                 }
                             }
+                            
                             if (userName) {
-                                // Record rival logout for AI learning
-                                if (config.aiPilotToggle && aiTimingPredictor) {
-                                    aiTimingPredictor.recordRivalLogout(userName, Date.now());
+                                // **OPTIMIZED: Check if user is a potential rival FIRST**
+                                const classification = classifyRival(userName, userId, this);
+                                
+                                if (classification.isRival) {
+                                    // Only log and process for actual rivals
+                                    appLog(`🚪 RIVAL PART: ${userName} (${userId}) departed`);
+                                    
+                                    // Track rival departure for AI learning
+                                    trackRivalActivity(userId, 'activity', { type: 'part', timestamp: Date.now() });
+                                    
+                                    // CRITICAL: Update AI session history with actual session duration
+                                    const rivalData = trackedRivals.get(userId);
+                                    const syncedRivalProfile = rivalActivityProfiles.get(userId);
+                                    const loginTime = syncedRivalProfile?.loginTime || (rivalData && rivalData.loginTime);
+                    
+                                    if (loginTime && aiPredictorEnabled) {
+                                        const currentTime = Date.now();
+                                        const actualSessionDuration = currentTime - loginTime;
+                                        try {
+                                            aiPredictor.updateRivalSessionHistory(userId, actualSessionDuration, 'departed_part');
+                                            appLog(`📊 PART: Updated session history for rival ${userName}: ${actualSessionDuration}ms`);
+                                        } catch (error) {
+                                            appLog(`❌ PART: AI session history update failed: ${error.message}`);
+                                        }
+                                    }
+                                    
+                                    handleRivalDeparture(userId, userName);
                                 }
-                                handleRivalDeparture(userId, userName);
+                                // No logging for non-rivals to reduce noise
                             }
                             remove_user(userName || userId);
                         }
@@ -1645,12 +2944,33 @@ async function createConnection() {
                                     break;
                                 }
                             }
+                            
                             if (userName) {
-                                // Record rival logout for AI learning
-                                if (config.aiPilotToggle && aiTimingPredictor) {
-                                    aiTimingPredictor.recordRivalLogout(userName, Date.now());
+                                // **OPTIMIZED: Check if user is a potential rival FIRST**
+                                const classification = classifyRival(userName, userId, this);
+                                
+                                if (classification.isRival) {
+                                    // Only log and process for actual rivals
+                                    appLog(`😴 RIVAL SLEEP: ${userName} (${userId}) went to sleep`);
+                                    
+                                    // Track rival sleep for AI learning
+                                    trackRivalActivity(userId, 'activity', { type: 'sleep', timestamp: Date.now() });
+                                    
+                                    // CRITICAL: Update AI session history with actual session duration
+                                    const rivalData = trackedRivals.get(userId);
+                                    const rivalProfile = rivalActivityProfiles.get(userId);
+                                    const loginTime = rivalProfile?.loginTime || rivalData?.loginTime;
+                    
+                                    if (loginTime && aiPredictorEnabled) {
+                                        const currentTime = Date.now();
+                                        const actualSessionDuration = currentTime - loginTime;
+                                        aiPredictor.updateRivalSessionHistory(userId, actualSessionDuration, 'departed_sleep');
+                                        appLog(`📊 SLEEP: Updated session history for rival ${userName}: ${actualSessionDuration}ms`);
+                                    }
+                                    
+                                    handleRivalDeparture(userId, userName);
                                 }
-                                handleRivalDeparture(userId, userName);
+                                // No logging for non-rivals to reduce noise
                             }
                         }
                         break;
@@ -1697,7 +3017,7 @@ async function createConnection() {
                                             // Process 353 messages during JOIN attempts
                                             if (message.includes("353")) {
                                                 parse353(message, this);
-                                                appLog(`🔍 Processed 353 during prison release JOIN`);
+                                                // Removed noisy log for 353 processing during prison release
                                             }
                                             
                                             if (message.includes("KICK") && message.includes("Нельзя перелетать чаще одного раза в 3 с.")) {
@@ -1760,24 +3080,6 @@ async function createConnection() {
                                 });
                                 
                                 appLog(`✅ Prison release completed - Bot will rejoin planet and resume normal operation`);
-                            } else if (config.aiPilotToggle && !isProcessingRivalAction) {
-                                // This might be a rival successfully kicking someone else - record their successful attempt
-                                const kickerName = parts[0]; // The one who sent the kick message
-                                const kickedUserId = parts[commandIndex + 2];
-                                
-                                // Find the rival who might have done the kicking
-                                for (const [rivalId, rivalData] of trackedRivals.entries()) {
-                                    if (rivalData.name === kickerName || rivalId === kickerName) {
-                                        const estimatedTiming = Date.now() % 3000; // Rough estimate
-                                        
-                                        aiTimingPredictor.recordRivalKickAttempt(rivalData, estimatedTiming, true).catch(err => {
-                                            appLog(`❌ Error recording rival successful kick: ${err.message}`);
-                                        });
-                                        
-                                        appLog(`📊 Recorded successful kick by ${rivalData.name} at ~${estimatedTiming}ms`);
-                                        break;
-                                    }
-                                }
                             }
                         }
                         break;
@@ -1833,79 +3135,68 @@ async function createConnection() {
                         }
                         break;
                     case "850":
-                        if (payload.includes("3 секунд(ы)") || payload.includes("Нельзя")) {
+                        const is3SecondRule = payload.includes("3 секунд(ы)") || payload.includes("Нельзя");
+                        const kickSuccess = !is3SecondRule;
+                        
+                        // Enhanced 3-second rule processing with immediate feedback
+                        if (lastKickedRival && lastKickedRival.predictedTiming) {
+                            const actualSessionDuration = Date.now() - lastKickedRival.loginTime;
+                            
+                            // CRITICAL: Record session duration for successful kicks in AI history
+                            if (kickSuccess && aiPredictorEnabled) {
+                                aiPredictor.updateRivalSessionHistory(lastKickedRival.id, actualSessionDuration, 'kicked_successfully');
+                                appLog(`📊 KICK SUCCESS: Updated session history for ${lastKickedRival.name}: ${actualSessionDuration}ms`);
+                            }
+                            
+                            // Immediate AI feedback processing (within 50ms as per AI pilot context)
+                            processThreeSecondRuleFeedback(
+                                lastKickedRival.id,
+                                lastKickedRival.predictedTiming,
+                                is3SecondRule
+                            );
+                            
+                            // Log outcome for ML training
+                            mlDataLogger.logOutcome(
+                                lastKickedRival.id,
+                                lastKickedRival.predictedTiming,
+                                kickSuccess,
+                                actualSessionDuration,
+                                {
+                                    wasThreeSecondRule: is3SecondRule,
+                                    mode: lastKickedRival.mode,
+                                    timingError: is3SecondRule ? 50 : 0
+                                }
+                            );
+                            
+                            appLog(`📊 Enhanced AI Feedback: Rival=${lastKickedRival.name}, Success=${kickSuccess}, 3sRule=${is3SecondRule}, Duration=${actualSessionDuration}ms`);
+                        }
+                        
+                        // Original timing adjustment logic (as fallback)
+                        if (is3SecondRule) {
                             appLog(`⚡ 3-second rule detected. Immediate Exit and re-evaluation.`);
-                            
-                            // Record 3s error for AI learning
-                            if (config.aiPilotToggle && isProcessingRivalAction) {
-                                for (const [rivalId, rivalData] of trackedRivals.entries()) {
-                                    if (rivalData.kickStartTime && Date.now() - rivalData.kickStartTime < 5000) {
-                                        recordKickResult(rivalData, false, 'early_kick_penalty', true).catch(err => {
-                                            appLog(`❌ Error recording 3s error: ${err.message}`);
-                                        });
-                                        break;
-                                    }
-                                }
-                            } else if (config.aiPilotToggle && !isProcessingRivalAction) {
-                                // This might be a rival getting early kick penalty - record their failed attempt
-                                const recentRivals = Array.from(trackedRivals.entries())
-                                    .filter(([id, data]) => Date.now() - data.lastSeen < 5000) // Active in last 5 seconds
-                                    .sort((a, b) => b[1].lastSeen - a[1].lastSeen);
-                                
-                                if (recentRivals.length > 0) {
-                                    const [rivalId, rivalData] = recentRivals[0];
-                                    const estimatedRivalTiming = Date.now() % 3000; // Rough estimate
-                                    
-                                    aiTimingPredictor.recordRivalKickAttempt(rivalData, estimatedRivalTiming, false).catch(err => {
-                                        appLog(`❌ Error recording rival failed kick attempt: ${err.message}`);
-                                    });
-                                    
-                                    appLog(`📊 Recorded failed kick attempt by ${rivalData.name} at ~${estimatedRivalTiming}ms`);
-                                }
-                            }
-                            
-                            // CRITICAL: Reset processing flags immediately
-                            isProcessingRivalAction = false;
-                            if (processingRivalTimeout) {
-                                clearTimeout(processingRivalTimeout);
-                                processingRivalTimeout = null;
-                            }
-                            
-                            this.send("QUIT :ds");
-                            await this.cleanup(); // Ensure connection is fully closed
-                             if (activeConnection === this) {
-                                 activeConnection = null;
-                             }
-                            // Now proceed with the original 850 handling logic for timing adjustment and reconnection
-                            appLog(`3s notification detected in mode: ${currentMode}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
                                 const newTiming = incrementTiming(currentMode, this, '3second');
                                 appLog(`Adjusted ${currentMode} timing due to 3-second rule: ${newTiming}ms`);
-                            } else {
-                                appLog(`3s notification but no active mode, current mode: ${currentMode}`);
                             }
-                            // Trigger reconnection after handling the 850 error
-                           // Promise.resolve().then(() => getConnection(true, true).catch(err => appLog(`Failed after 850 error:`, err)));
-                            return; // Exit handleMessage after immediate QUIT and re-evaluation
                         } else {
-                            // CRITICAL: Reset processing flags for successful kick too
-                            isProcessingRivalAction = false;
-                            if (processingRivalTimeout) {
-                                clearTimeout(processingRivalTimeout);
-                                processingRivalTimeout = null;
-                            }
-                            
-                            this.send("QUIT :ds");
-                            await this.cleanup(); // Ensure connection is fully closed
-                             if (activeConnection === this) {
-                                 activeConnection = null;
-                             }
                             appLog(`⚡⚡KICKED Rival in mode: ${currentMode} - ${payload}`);
                             if (currentMode === 'attack' || currentMode === 'defence') {
                                 const newTiming = incrementTiming(currentMode, this, 'success');
                                 appLog(`Adjusted ${currentMode} timing due to kick: ${newTiming}ms`);
-                                
                             }
+                        }
+                        
+                        // Reset processing flags and cleanup
+                        isProcessingRivalAction = false;
+                        if (processingRivalTimeout) {
+                            clearTimeout(processingRivalTimeout);
+                            processingRivalTimeout = null;
+                        }
+                        
+                        this.send("QUIT :ds");
+                        await this.cleanup();
+                        if (activeConnection === this) {
+                            activeConnection = null;
                         }
                         break;
                     case "FOUNDER":
@@ -2054,16 +3345,70 @@ async function createConnection() {
     }
 
 async function scheduleRivalKick(rivalId, rivalData) {
-    const waitTime = await getCurrentTiming(rivalData.mode, rivalData.connection, rivalData);
+    // Check for preemptive logout first
+    const preemptiveLogout = detectPreemptiveLogout(rivalId);
+    if (preemptiveLogout.shouldKick) {
+        appLog(`⚡ Preemptive logout kick scheduled: ${rivalData.name} in 12ms (confidence: ${preemptiveLogout.confidence.toFixed(2)})`);
+        
+        // Log preemptive prediction
+        if (aiPredictorEnabled) {
+            mlDataLogger.logPrediction(
+                rivalId,
+                'preemptive',
+                12,
+                {
+                    sessionDuration: Date.now() - rivalData.loginTime,
+                    logoutProbability: preemptiveLogout.confidence,
+                    activityLevel: getRivalActivityLevel(rivalId)
+                },
+                preemptiveLogout.confidence
+            );
+        }
+        
+        // Schedule immediate kick
+        rivalData.kickTimeout = setTimeout(() => {
+            executeRivalKick(rivalId, rivalData);
+        }, 12); // 12ms delay for preemptive kick
+        
+        return;
+    }
+    
+    // Pass rival information to getCurrentTiming for AI prediction (single call to avoid duplicates)
+    const waitTime = await getCurrentTiming(
+        rivalData.mode, 
+        rivalData.connection, 
+        rivalId, 
+        rivalData.name, 
+        rivalData.loginTime
+    );
+
+    // Use the same timing value to avoid duplicate AI predictions
+    lastPredictedTiming = waitTime;
     const presenceCheckTime = Math.max(0, waitTime - 200);
     
     // High precision scheduling
     const scheduleTime = getHighPrecisionTime();
     rivalData.scheduledTime = scheduleTime + waitTime;
+    rivalData.predictedTiming = waitTime; // Store for feedback
     
-    appLog(`📅 Scheduling rival ${rivalData.name} (${rivalData.mode}) - Wait: ${waitTime}ms, Check: ${presenceCheckTime}ms`);
+    // Log prediction for ML training
+    if (aiPredictorEnabled) {
+        mlDataLogger.logPrediction(
+            rivalId,
+            rivalData.mode,
+            waitTime,
+            {
+                sessionDuration: Date.now() - rivalData.loginTime,
+                activityLevel: getRivalActivityLevel(rivalId),
+                movementFreq: getRivalMovementFreq(rivalId)
+            },
+            0.8 // Default confidence
+        );
+    }
     
-    // Validate timing values
+    appLog(`📅 AI Scheduling rival ${rivalData.name} (${rivalData.mode}) - Wait: ${waitTime}ms, Check: ${presenceCheckTime}ms`);
+    
+    // Rest of original scheduling logic remains the same
     if (!waitTime || waitTime <= 0) {
         appLog(`❌ Invalid wait time ${waitTime}ms for rival ${rivalData.name}, using default 2000ms`);
         const defaultWaitTime = 2000;
@@ -2079,7 +3424,6 @@ async function scheduleRivalKick(rivalId, rivalData) {
         return;
     }
     
-    // High precision scheduling with drift correction
     const adjustedPresenceTime = presenceCheckTime - timingDriftCorrection;
     const adjustedWaitTime = waitTime - timingDriftCorrection;
     
@@ -2107,30 +3451,40 @@ function checkRivalPresence(rivalId, rivalData) {
 
 function executeRivalKick(rivalId, rivalData) {
     if (!trackedRivals.has(rivalId)) {
-        cleanupRivalTracking(rivalId);
         return;
     }
     
-    // CRITICAL: Atomic check and set to prevent race conditions
+    // CRITICAL: Store rival data for AI feedback
+    lastKickedRival = {
+        id: rivalId,
+        name: rivalData.name,
+        loginTime: rivalData.loginTime,
+        predictedTiming: rivalData.predictedTiming,
+        mode: rivalData.mode
+    };
+    
+    // IMPORTANT: Mark rival as being kicked but DON'T remove from tracking yet
+    // We need to keep the rivalData until we get 850 response OR PART/SLEEP command
+    rivalData.beingKicked = true;
+    rivalData.kickStartTime = Date.now();
+    
+    // Clear the scheduled timeouts since we're executing now
+    if (rivalData.kickTimeout) {
+        clearTimeout(rivalData.kickTimeout);
+        rivalData.kickTimeout = null;
+    }
+    if (rivalData.presenceCheckTimeout) {
+        clearTimeout(rivalData.presenceCheckTimeout);
+        rivalData.presenceCheckTimeout = null;
+    }
+    
     if (isProcessingRivalAction) {
         appLog(`⚠️ Rival action already in progress, skipping ${rivalData.name}`);
-        cleanupRivalTracking(rivalId);
         return;
     }
     
-    // Record kick execution timing for AI learning
-    const kickStartTime = Date.now();
-    const predictedTiming = rivalData.scheduledTime ? (rivalData.scheduledTime - kickStartTime) : null;
-    
-    // Clean up tracking BEFORE setting processing flag to prevent stuck state
-    cleanupRivalTracking(rivalId);
-    
     isProcessingRivalAction = true;
-    appLog(`⚡ Executing scheduled kick for rival ${rivalData.name}`);
-    
-    // Store kick data for result tracking
-    rivalData.kickStartTime = kickStartTime;
-    rivalData.predictedTiming = predictedTiming;
+    appLog(`⚡ Executing AI-scheduled kick for rival ${rivalData.name} (predicted: ${rivalData.predictedTiming}ms)`);
     
     processingRivalTimeout = setTimeout(() => {
         if (isProcessingRivalAction) {
@@ -2138,14 +3492,10 @@ function executeRivalKick(rivalId, rivalData) {
             isProcessingRivalAction = false;
             processingRivalTimeout = null;
             
-            // Record timeout as failure for AI learning
-            if (config.aiPilotToggle && rivalData.kickStartTime) {
-                recordKickResult(rivalData, false, 'timeout').catch(err => {
-                    appLog(`❌ Error recording timeout result: ${err.message}`);
-                });
-            }
+            // Clean up rival tracking on timeout
+            cleanupRivalTracking(rivalId);
         }
-    }, 2000); // Increased timeout to 2 seconds
+    }, 5000); // Extended timeout to allow for PART/SLEEP commands
     
     handleRivals([{ name: rivalData.name, id: rivalId, coordinate: rivalData.coordinate }], rivalData.mode, rivalData.connection);
 }
@@ -2159,37 +3509,35 @@ function cleanupRivalTracking(rivalId) {
     }
 }
 
-async function handleRivalDeparture(rivalId, rivalName) {
+function handleRivalDeparture(rivalId, rivalName) {
     const rivalData = trackedRivals.get(rivalId);
     if (rivalData) {
-        // Check if AI pilot should attempt preemptive kick
-        if (config.aiPilotToggle && !isProcessingRivalAction) {
-            try {
-                const logoutEvent = { type: 'PART_SLEEP', timestamp: Date.now() };
-                const preemptiveTiming = await aiTimingPredictor.predictPreemptiveKick(rivalData, logoutEvent);
-                
-                if (preemptiveTiming !== null && preemptiveTiming >= 0 && preemptiveTiming <= 15) {
-                    appLog(`⚡ AI Preemptive kick: ${preemptiveTiming}ms for departing ${rivalName}`);
-                    
-                    // Execute immediate preemptive kick
-                    setTimeout(() => {
-                        if (trackedRivals.has(rivalId) && !isProcessingRivalAction) {
-                            appLog(`🎯 Executing preemptive kick for ${rivalName}`);
-                            executeRivalKick(rivalId, rivalData);
-                        }
-                    }, preemptiveTiming);
-                    
-                    return true;
-                }
-            } catch (error) {
-                appLog(`❌ Preemptive kick prediction error: ${error.message}`);
-            }
+        appLog(`🚪 Rival ${rivalName} left early, cancelling scheduled action`);
+        
+        // Send feedback to AI about early departure
+        if (rivalData.predictedTiming && rivalData.loginTime) {
+            const actualSessionDuration = Date.now() - rivalData.loginTime;
+            
+            aiPredictor.processFeedback(
+                rivalId,
+                rivalData.predictedTiming,
+                false, // Early departure = failed prediction
+                actualSessionDuration
+            ).catch(error => {
+                appLog(`❌ AI Early departure feedback error: ${error.message}`);
+            });
+            
+            appLog(`📊 AI Early departure feedback: Duration=${actualSessionDuration}ms vs Predicted=${rivalData.predictedTiming}ms`);
         }
         
-        appLog(`🚪 Rival ${rivalName} left early, cancelling scheduled action`);
+        // CRITICAL: Clean up rival tracking to allow rejoining
         cleanupRivalTracking(rivalId);
-        // Stay on same RC without altering - no reconnection needed
+        appLog(`🧹 Cleaned up tracking for ${rivalName} (${rivalId}) - ready for rejoin`);
         return true;
+    } else {
+        // CRITICAL: Even if no rivalData, ensure tracking is cleared for rejoining
+        appLog(`🧹 Force cleanup tracking for ${rivalName} (${rivalId}) - no existing data but ensuring clean state`);
+        cleanupRivalTracking(rivalId);
     }
     return false;
 }
@@ -2249,11 +3597,6 @@ function parse353(message, connection) {
                     }
                 }
                 detectedRivals.push({ name, id, coordinate });
-                
-                // Record rival login for AI learning
-                if (config.aiPilotToggle && aiTimingPredictor) {
-                    aiTimingPredictor.recordRivalLogin(name, Date.now());
-                }
             }
             i++;
         }
@@ -2271,6 +3614,14 @@ function parse353(message, connection) {
                 validRivals.forEach(rival => {
                     if (!trackedRivals.has(rival.id)) {
                         addToBatch(rival, 'defence', connection);
+                    } else if (trackedRivals.has(rival.id)) {
+                        // **FORCE CLEANUP AND RETRY - Same as handleJoinCommand**
+                        cleanupRivalTracking(rival.id);
+                        appLog(`🧹 353: Force cleaned tracking for ${rival.name} (${rival.id})`);
+                        
+                        // Retry immediately after cleanup
+                        addToBatch(rival, 'defence', connection);
+                        appLog(`📋 353: Force queued rival ${rival.name} for defence mode after cleanup`);
                     }
                 });
             } else {
@@ -2304,11 +3655,6 @@ function handleJoinCommand(parts, connection) {
             }
             
             // Dynamic delay to allow FOUNDER commands to be processed first
-            // Record rival login for AI learning
-            if (config.aiPilotToggle && aiTimingPredictor) {
-                aiTimingPredictor.recordRivalLogin(name, Date.now());
-            }
-            
             setTimeout(() => {
                 if (!founderIds.has(id) && !trackedRivals.has(id)) {
                     const rival = { name, id, coordinate };
@@ -2316,6 +3662,15 @@ function handleJoinCommand(parts, connection) {
                     appLog(`📋 Queued rival ${name} for attack mode`);
                 } else if (founderIds.has(id)) {
                     appLog(`✅ ${name} is a founder, skipping attack`);
+                } else if (trackedRivals.has(id)) {
+                    // **FORCE CLEANUP AND RETRY**
+                    cleanupRivalTracking(id);
+                    appLog(`🧹 Force cleaned tracking for ${name} (${id})`);
+                    
+                    // Retry immediately after cleanup
+                    const rival = { name, id, coordinate };
+                    addToBatch(rival, 'attack', connection);
+                    appLog(`📋 Force queued rival ${name} for attack mode after cleanup`);
                 }
             }, 150); // 150ms delay for single rival JOIN
         }
@@ -2570,7 +3925,9 @@ async function handlePrisonAutomation(connection) {
 }
 
 optimizedConnectionPoolMaintenance()
-    .then(() => appLog("🚀 Optimized connection initialized"))
+    .then(() => {
+        // Removed noisy "Optimized connection initialized" log
+    })
     .catch(err => appLog("Initial setup failed:", err));
 
 setInterval(() => {
