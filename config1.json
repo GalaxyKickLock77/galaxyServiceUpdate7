@@ -20,6 +20,5 @@
     "actionOnEnemy1": "true",
     "aiChatToggle1": "true",
     "dualRCToggle1": "true",
-    "kickAllToggle1": "false",
-    "aiPredictorEnabled": "true"
+    "kickAllToggle1": "false"
 }
